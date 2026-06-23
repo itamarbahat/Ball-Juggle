@@ -1,0 +1,120 @@
+DASHBOARD REBUILD — PROGRESS TRACKER
+======================================
+Based on PRD.md
+Started: 2026-06-23
+Implemented: 2026-06-23
+
+STATUS KEY:
+  [ ] = Not started
+  [~] = In progress
+  [x] = Done
+  [!] = Blocked / needs review
+
+--------------------------------------
+TASK 1 — Create dashboard.py
+--------------------------------------
+[x] 1.1  Module skeleton & layout/colour constants
+          NOTE: layout is RESPONSIVE (computed from live window size each
+          frame) instead of fixed pixels — works at 1920x1080, 1920x1200,
+          portrait 1080x1920, resized, and full-screen.
+[x] 1.2  Dashboard.__init__ (window, fonts, state attributes)
+[x] 1.3  Dashboard.draw() main draw method (skeleton + call sequence)
+[x] 1.4  _draw_header()
+[x] 1.5  _draw_feed_panel() — Camera Side A + all overlays
+          [x] 1.5a Base frame display
+          [x] 1.5b Drop alert overlay
+          [x] 1.5c Hit popup overlay (drift + fade)
+          [x] 1.5d Countdown / GO! overlay
+          [x] 1.5e Winner overlay
+[x] 1.6  _draw_feed_panel() reused for Camera Side B (overlays=False)
+[x] 1.7  _draw_info_panel()
+          [x] 1.7a Calibration checklist section (with check-mark glyph)
+          [x] 1.7b Game state badge section
+          [x] 1.7c Scores section
+          [x] 1.7d Toast area
+[x] 1.8  _draw_status_bar()
+[x] 1.9  Dashboard.poll_events()
+[x] 1.10 _bgr_surf() module-level helper (+ _fit aspect helper)
+
+--------------------------------------
+TASK 2 — Modify main.py
+--------------------------------------
+[x] 2.1  Add imports (pygame, subprocess, os, json, Dashboard)
+[x] 2.2  Add _check_hsv_calibrated() helper
+[x] 2.3  Remove 8 draw functions now in dashboard:
+          [x] draw_game_score
+          [x] draw_state_banner
+          [x] draw_countdown
+          [x] draw_hit_popup
+          [x] draw_drop_alert
+          [x] draw_winner
+          [x] draw_toast
+          [x] draw_pip
+[x] 2.4  Initialise Dashboard in main() + set startup cal flags
+[x] 2.5  OpenCV frame annotations unchanged (tracking, floor grid, color-only)
+[x] 2.6  Dashboard state update block in main loop
+[x] 2.7  Replace cv2.imshow + cv2.waitKey with dashboard.draw + poll_events
+[x] 2.8  Rewrite key-handling loop with pygame key constants
+[x] 2.9  HSV calibrator launch on K_1 (subprocess + flag update)
+          NOTE: now releases + reacquires cameras around the subprocess so
+          the HSV helper can open the camera mid-session (with warm-up loop).
+[x] 2.10 Post-calibration dash.cal flag updates for B, S, F, 1 keys
+[x] 2.11 Floor calibration cv2 window cleanup + pygame.event.clear()
+[x] 2.12 Toast routing via dash.set_toast()
+[x] 2.13 Event overlay routing (drop, hit, GO!, winner -> dashboard attrs)
+[x] 2.14 Cleanup on exit (cv2.destroyAllWindows + pygame.quit)
+[x] 2.15 Remove unused variables (show_pip, delay_ms, local toast/hit/winner)
+
+--------------------------------------
+TASK 3 — Camera label rename (main.py)
+--------------------------------------
+[x] 3.1  "SIDE:" -> "SIDE-A:" in draw_tracking_info calls
+[x] 3.2  "TOP:" -> "SIDE-B:" in draw_tracking_info calls
+[x] 3.3  Floor cal cv2 window names -> "Floor Cal - Camera Side A/B"
+[x] 3.4  Mask view panel labels -> "SIDE-A / SIDE-B - DETECTION"
+[x] 3.5  Floor-cal "ball not detected" message -> SIDE-A / SIDE-B
+
+--------------------------------------
+TASK 4 — B/W Mask debug window (V key)
+--------------------------------------
+[x] 4.1  Mask window kept as separate cv2 window; cv2.waitKey(1) added each
+          frame it is shown so its GUI loop still pumps under pygame input.
+[x] 4.2  Repositioned to (40, 600) after window creation
+
+--------------------------------------
+TASK 5 — config.py comment update
+--------------------------------------
+[x] 5.1  Camera section comments (Side A / Side B)
+
+--------------------------------------
+INTEGRATION & TESTING
+--------------------------------------
+[x] dashboard.py compiles; main.py/config.py compile
+[x] pygame installed: classic pygame has no Python 3.14 wheel -> installed
+     pygame-ce 2.5.7 (drop-in, provides the `pygame` module). Sound + window OK.
+[x] Headless smoke test (SDL dummy): 16/16 draw paths pass, incl. portrait
+     1080x1920 and tiny 400x300 windows, all overlays, score states.
+[x] main.py imports clean; _check_hsv_calibrated() -> True; draw_pip removed;
+     build_mask_view kept.
+[x] Real-hardware launch (6s): pygame window opens, processors init, floor
+     calibration + homography load, dashboard renders. No crash / traceback.
+[!] Live booth test with TWO cameras — PENDING USER (needs the dual-camera
+     rig + a person juggling). On this dev box only camera index 0 exists, so
+     the second VideoCapture(0) fails (pre-existing config quirk, not a UI
+     regression). See NOTES.
+
+--------------------------------------
+NOTES
+--------------------------------------
+- Files NOT modified (as required): juggling_logic.py, ball_processor.py,
+  floor_finding.py, camera_manager.py, config_utils.py. Verified untouched.
+- Calibration Helper script.py launched as subprocess (unchanged file).
+- DEPENDENCY: pygame-ce 2.5.7 installed (classic pygame won't build on
+  Python 3.14). `import pygame` works identically. Consider adding
+  `pygame-ce` to install docs.
+- CAMERA CONFIG: config.py ships with top_source=0 AND side_source=0. With a
+  single physical camera these two captures collide (MSMF grab error seen in
+  testing). At the booth set the two real camera indices in config.py.
+- HSV-during-game: K_1 now stops dual_cam, runs the helper, then re-creates
+  DualCameraManager and warms up. If the booth cameras are slow to re-open
+  there may be a brief pause — verify live.
