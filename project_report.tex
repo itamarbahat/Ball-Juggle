@@ -1,0 +1,559 @@
+% !TEX program = xelatex
+\documentclass[12pt,a4paper]{article}
+
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage{hebrew}
+\setotherlanguage{english}
+
+% גופנים
+\setmainfont{David}[Script=Hebrew]
+\newfontfamily\hebrewfont{David}[Script=Hebrew]
+\newfontfamily\englishfont{Arial}
+\newfontfamily\codefont{Consolas}[Scale=0.9]
+
+\usepackage[a4paper,margin=2.2cm]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{mdframed}
+\usepackage{fancyvrb}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    urlcolor=blue!50!black,
+    bookmarksopen=true
+}
+
+% עיצוב כותרות ידני
+\makeatletter
+\renewcommand{\section}{\@startsection{section}{1}{0pt}%
+    {-3.5ex plus -1ex minus -.2ex}{2.3ex plus .2ex}%
+    {\Large\bfseries\color{blue!50!black}}}
+\renewcommand{\subsection}{\@startsection{subsection}{2}{0pt}%
+    {-3.25ex plus -1ex minus -.2ex}{1.5ex plus .2ex}%
+    {\large\bfseries\color{blue!40!black}}}
+\renewcommand{\subsubsection}{\@startsection{subsubsection}{3}{0pt}%
+    {-3.25ex plus -1ex minus -.2ex}{1.5ex plus .2ex}%
+    {\normalsize\bfseries\color{blue!30!black}}}
+\makeatother
+
+% מסגרת לקוד פייתון - באמצעות mdframed (תואם ל-bidi)
+\definecolor{codebg}{rgb}{0.97,0.97,0.97}
+\definecolor{codeframe}{rgb}{0.7,0.7,0.7}
+
+\newmdenv[
+    backgroundcolor=codebg,
+    linecolor=codeframe,
+    linewidth=0.5pt,
+    innertopmargin=4pt,
+    innerbottommargin=4pt,
+    innerleftmargin=8pt,
+    innerrightmargin=8pt,
+    skipabove=4pt,
+    skipbelow=4pt
+]{codebox}
+
+% תיבת הדגשה כחולה
+\newmdenv[
+    backgroundcolor=blue!5,
+    linecolor=blue!60!black,
+    linewidth=0.7pt,
+    innertopmargin=6pt,
+    innerbottommargin=6pt,
+    innerleftmargin=8pt,
+    innerrightmargin=8pt
+]{infobox}
+
+% תיבת אזהרה כתומה
+\newmdenv[
+    backgroundcolor=orange!8,
+    linecolor=orange!70!black,
+    linewidth=0.7pt,
+    innertopmargin=6pt,
+    innerbottommargin=6pt,
+    innerleftmargin=8pt,
+    innerrightmargin=8pt
+]{warnbox}
+
+\title{\Huge\bfseries מערכת ספירת ז'אנגלינג בזמן אמת \\[0.4em] \Large ניתוח מקיף של המערכת, האלגוריתמים, ושלבי הכיול}
+\author{\Large Live Juggling --- קבוצה 18}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\vspace{1cm}
+
+\noindent
+מסמך זה מהווה ניתוח טכני מקיף של פרויקט \textenglish{Live Juggling}, מערכת מבוססת ראייה ממוחשבת לזיהוי וספירת בעיטות ז'אנגלינג בזמן אמת באמצעות שתי מצלמות (עליונה וצדדית). המסמך סוקר את ארכיטקטורת המערכת, צינור עיבוד התמונה, האלגוריתמים המרכזיים בהם נעשה שימוש (\textenglish{MOG2, HSV, Hough Circles, Kalman Filter, Homography}), שלבי הכיול השונים, לוגיקת המשחק וההיגיון מאחורי כל החלטה תכנונית.
+
+\vspace{0.5cm}
+\tableofcontents
+\newpage
+
+% =========================================================
+\section{מבוא ומטרת הפרויקט}
+
+הפרויקט נועד לפתח מערכת אוטומטית לזיהוי וספירת בעיטות ז'אנגלינג של כדור רגל בזמן אמת, באמצעות ראייה ממוחשבת בלבד וללא חיישנים פיזיים מותקנים על הכדור או על השחקן.
+
+\subsection{אתגרים מרכזיים}
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{שונות סביבתית} --- תנאי תאורה משתנים, רקע דינמי וצבעי כדור משתנים.
+    \item \textbf{חסימות} (\textenglish{Occlusions}) --- הכדור עלול להיעלם זמנית מאחורי גוף השחקן.
+    \item \textbf{הפרדה בין בעיטה לנפילה לרצפה} --- שני האירועים יוצרים שינוי כיוון של הכדור כלפי מעלה, ויש להבחין ביניהם במהירות גבוהה.
+    \item \textbf{זיהוי נגיעת ראש} (\textenglish{header}) --- אירוע שמתבצע בציר \textenglish{Z} (לכיוון או מהמצלמה העליונה) ולא בציר \textenglish{Y}.
+    \item \textbf{דיוק זמן אמת} --- כל הפעולות חייבות לרוץ במסגרת קצב הפריימים של המצלמות.
+\end{itemize}
+
+\subsection{גישת הפתרון}
+המערכת משלבת \textbf{שתי מצלמות} (\textenglish{top + side}) שמספקות שתי תצוגות בלתי תלויות של אותה זירת משחק. שילוב המידע משתי המצלמות מאפשר:
+\begin{enumerate}[leftmargin=2em]
+    \item הצלבת זיהויי כדור והפחתת \textenglish{False Positives}.
+    \item שימוש בהומוגרפיה (\textenglish{Homography}) לחישוב מיקום אמיתי של הכדור במישור הרצפה.
+    \item זיהוי נגיעות ראש על־ידי ניתוח השינוי ברדיוס הכדור במצלמה העליונה.
+\end{enumerate}
+
+% =========================================================
+\section{ארכיטקטורת המערכת}
+
+\subsection{מבנה מודולרי של הפרויקט}
+המערכת מאורגנת כצינור (\textenglish{pipeline}) של מודולים בעלי אחריות בודדת, על פי עיקרון \textenglish{Single Responsibility}:
+
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{\textenglish{main.py}} --- לולאה ראשית, ניהול קלט מקלדת, רינדור \textenglish{UI}, תזמור הכיולים.
+    \item \textbf{\textenglish{camera\_manager.py}} --- ניהול מצלמות בתהליכון (\textenglish{thread}) נפרד.
+    \item \textbf{\textenglish{ball\_processor.py}} --- צינור זיהוי הכדור לכל מצלמה בנפרד.
+    \item \textbf{\textenglish{juggling\_logic.py}} --- לוגיקת המשחק, ספירת בעיטות, זיהוי נפילה.
+    \item \textbf{\textenglish{floor\_finding.py}} --- מודול הומוגרפיה לזיהוי מגע ברצפה.
+    \item \textbf{\textenglish{config.py + config\_utils.py}} --- ניהול קונפיגורציה ושמירת הגדרות.
+    \item \textbf{\textenglish{Calibration Helper script.py}} --- כלי חיצוני לכיול \textenglish{HSV}.
+    \item \textbf{\textenglish{evaluate\_segmentation.py}} --- הערכת איכות סגמנטציה מול \textenglish{ground truth}.
+\end{itemize}
+
+\subsection{זרימת מידע ראשית}
+\begin{enumerate}[leftmargin=2em]
+    \item \textenglish{DualCameraManager} מספק שני פריימים סינכרוניים (\textenglish{top}, \textenglish{side}).
+    \item כל פריים מועבר ל־\textenglish{BallProcessor} מתאים, שמחזיר \textenglish{(x, y, r)} של הכדור.
+    \item שני זיהויי הכדור מועברים ל־\textenglish{JugglingCounter.update()}, שמעדכן את מצב המשחק.
+    \item תוצאות הציור מתבצעות בלולאה הראשית ומוצגות בשני חלונות \textenglish{OpenCV}.
+\end{enumerate}
+
+\begin{infobox}
+\textbf{הערה ארכיטקטונית:} המצלמה הצדדית (\textenglish{side}) משמשת כ\textbf{מאסטר} --- היא קובעת אם המערכת זיהתה כדור בכלל. המצלמה העליונה (\textenglish{top}) משמשת כ\textbf{סלייב} --- היא משתמשת במצב \textenglish{relaxed} (חיפוש קונטור) רק כאשר המצלמה הצדדית הצליחה לזהות את הכדור. זה מפחית רעש ושומר על דיוק גבוה.
+\end{infobox}
+
+% =========================================================
+\section{צינור עיבוד התמונה}
+
+הצינור פועל בכל פריים בנפרד ומורכב מהשלבים הבאים:
+
+\subsection{שלב 1: רכישה ועיבוד מקדים}
+\begin{itemize}[leftmargin=2em]
+    \item שינוי גודל אחיד ל־\textenglish{$640 \times 360$} פיקסלים (\textenglish{INTER\_AREA}).
+    \item חיתוך ל־\textenglish{ROI} (\textenglish{Region Of Interest}) להפחתת רעש.
+    \item טשטוש גאוסיאני (\textenglish{GaussianBlur $11 \times 11$}) להחלקת הפיקסלים.
+\end{itemize}
+
+\subsection{שלב 2: מסיכת תנועה -- \textenglish{MOG2}}
+המערכת משתמשת באלגוריתם \textbf{\textenglish{Mixture of Gaussians 2}} של \textenglish{OpenCV} לזיהוי פיקסלים בתנועה.
+
+\textbf{קוד אתחול המסנן ב־\textenglish{ball\_processor.py}:}
+\begin{codebox}
+\begin{otherlanguage*}{english}
+\begin{Verbatim}[fontsize=\small, formatcom=\codefont]
+self.fgbg = cv2.createBackgroundSubtractorMOG2(
+    history=CONFIG["background"].get("mog2_history", 500),
+    varThreshold=CONFIG["background"].get("mog2_threshold", 25),
+    detectShadows=False
+)
+\end{Verbatim}
+\end{otherlanguage*}
+\end{codebox}
+
+\textbf{עיקרון פעולה:} כל פיקסל מתואר על־ידי תערובת של גאוסיאנים שמייצגים את התפלגות הצבעים שלו לאורך זמן. פיקסלים שחורגים מההתפלגות הנלמדת מסומנים כתנועה (\textenglish{foreground}). \textbf{היתרון:} עמידות לרעש ושינויי תאורה איטיים.
+
+\subsection{שלב 3: מסיכת צבע -- \textenglish{HSV Thresholding}}
+\begin{codebox}
+\begin{otherlanguage*}{english}
+\begin{Verbatim}[fontsize=\small, formatcom=\codefont]
+hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+color_mask = cv2.inRange(hsv, self.lower_hsv, self.upper_hsv)
+\end{Verbatim}
+\end{otherlanguage*}
+\end{codebox}
+
+המעבר ממרחב \textenglish{BGR} ל־\textenglish{HSV} מאפשר לבודד צבע לפי \textbf{גוון} (\textenglish{Hue}) ללא תלות בעוצמת התאורה. ערכי החסם (\textenglish{lower\_hsv}, \textenglish{upper\_hsv}) נטענים מקובץ \textenglish{ball\_config.json}, אחד לכל מצלמה.
+
+\subsection{שלב 4: מיזוג היברידי}
+שתי המסיכות מאוחדות ב־\textenglish{AND} לוגי:
+
+\begin{codebox}
+\begin{otherlanguage*}{english}
+\begin{Verbatim}[fontsize=\small, formatcom=\codefont]
+if self.mog_bypass_frames > 0:
+    final_mask = color_mask  # color-only mode (calibration)
+    self.mog_bypass_frames -= 1
+else:
+    final_mask = cv2.bitwise_and(color_mask, color_mask, mask=fgmask)
+\end{Verbatim}
+\end{otherlanguage*}
+\end{codebox}
+
+זה מבטיח שרק אזורים ש\textbf{גם זזים וגם בצבע הנכון} ייחשבו כמועמדים לכדור.
+
+\subsection{שלב 5: פעולות מורפולוגיות}
+\begin{itemize}[leftmargin=2em]
+    \item \textenglish{Opening} (\textenglish{kernel $3 \times 3$}) --- מסיר רעש קטן.
+    \item \textenglish{Closing} (\textenglish{kernel $11 \times 11$}) --- סוגר חורים בתוך הכדור.
+\end{itemize}
+
+% =========================================================
+\section{אלגוריתמי הזיהוי}
+
+\subsection{זיהוי קפדני -- \textenglish{Hough Circle Transform}}
+שיטה זו (מצב \textenglish{strict}) מחפשת מעגלים מושלמים גיאומטרית:
+
+\begin{codebox}
+\begin{otherlanguage*}{english}
+\begin{Verbatim}[fontsize=\small, formatcom=\codefont]
+circles = cv2.HoughCircles(
+    mask_blurred_for_hough,
+    cv2.HOUGH_GRADIENT,
+    dp=1.2, minDist=100,
+    param1=50, param2=20,
+    minRadius=self.min_hough_r,
+    maxRadius=self.max_hough_r
+)
+\end{Verbatim}
+\end{otherlanguage*}
+\end{codebox}
+
+\textbf{עיקרון:} כל פיקסל קצה ב\,\textbf{גרדיאנט}\, מצביע (\textenglish{votes}) על מרכזי מעגלים פוטנציאליים במרחב \textenglish{Hough}. המעגלים בעלי הקולות הרבים ביותר נבחרים כתוצאה. \textbf{היתרון:} עמיד לזיהויים שאינם מעגליים (כמו רגליים).
+
+\subsection{זיהוי גמיש -- \textenglish{Contour Analysis}}
+אם \textenglish{Hough} כשל והמצב הוא \textenglish{relaxed} (כלומר -- המצלמה הצדדית כן ראתה את הכדור), מתבצעת חזרה (\textenglish{fallback}) לזיהוי קונטור:
+
+\begin{codebox}
+\begin{otherlanguage*}{english}
+\begin{Verbatim}[fontsize=\small, formatcom=\codefont]
+contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, ...)
+if contours:
+    largest_contour = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(largest_contour)
+    if area > CONFIG["detection"].get("relaxed_min_area", 100):
+        ((x, y), radius) = cv2.minEnclosingCircle(largest_contour)
+\end{Verbatim}
+\end{otherlanguage*}
+\end{codebox}
+
+\subsection{החלקה ותחזית -- \textenglish{Kalman Filter}}
+מסנן קלמן מתוחזק לכל מצלמה. הוא ממלא שני תפקידים:
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{החלקה} --- הפחתת רעידות במיקום הכדור בין פריימים סמוכים.
+    \item \textbf{תחזית בחסימה} --- במקרה שהכדור נעלם זמנית, המסנן ממשיך לחזות את מיקומו על פי המהירות הקודמת.
+\end{enumerate}
+
+\begin{codebox}
+\begin{otherlanguage*}{english}
+\begin{Verbatim}[fontsize=\small, formatcom=\codefont]
+self.kf = cv2.KalmanFilter(4, 2)  # state: [x, y, dx, dy]
+self.kf.measurementMatrix = np.array([[1, 0, 0, 0],
+                                      [0, 1, 0, 0]], dtype=np.float32)
+self.kf.transitionMatrix  = np.array([[1, 0, 1, 0],
+                                      [0, 1, 0, 1],
+                                      [0, 0, 1, 0],
+                                      [0, 0, 0, 1]], dtype=np.float32)
+self.kf.processNoiseCov     = np.eye(4, dtype=np.float32) * 0.03
+self.kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.1
+\end{Verbatim}
+\end{otherlanguage*}
+\end{codebox}
+
+המודל הוא \textbf{תנועה לינארית במהירות קבועה} (\textenglish{constant-velocity}). אם המיקום החזוי יוצא מגבולות הפריים, המסנן מתאפס.
+
+% =========================================================
+\section{זיהוי רצפה באמצעות הומוגרפיה}
+
+זהו אחד החידושים החשובים בפרויקט. במקום להסתמך על קו רצפה דמיוני (קו ישר בין שתי \textenglish{anchors}), המערכת בונה \textbf{מודל גיאומטרי מלא} של הרצפה.
+
+\subsection{הרעיון}
+על־ידי מציאת \textbf{מטריצת הומוגרפיה} ($H$) שממפה כל פיקסל מהמצלמה למישור הרצפה האמיתי, ניתן לבדוק האם הכדור נמצא בפועל על הרצפה. אם שתי המצלמות מסכימות שהכדור נמצא באותה נקודה במישור הרצפה --- הוא כנראה באמת על הרצפה.
+
+\subsection{מתמטית}
+לכל מצלמה $i$ נחשבת מטריצה $H_i \in \mathbb{R}^{3 \times 3}$ כך ש:
+\begin{english}
+\[
+\begin{pmatrix} X_w \\ Y_w \\ 1 \end{pmatrix} \sim H_i \cdot \begin{pmatrix} u_i \\ v_i \\ 1 \end{pmatrix}
+\]
+\end{english}
+כאשר $(u_i, v_i)$ הם פיקסלי המצלמה ו־$(X_w, Y_w)$ הם הקואורדינטות במישור הרצפה (סנטימטרים). הבדיקה בפועל:
+\begin{english}
+\[
+\| H_1 p_1 - H_2 p_2 \| \leq \varepsilon \;\Longrightarrow\; \text{ball on floor}
+\]
+\end{english}
+
+\subsection{מימוש}
+\begin{codebox}
+\begin{otherlanguage*}{english}
+\begin{Verbatim}[fontsize=\small, formatcom=\codefont]
+self.H1, _ = cv2.findHomography(pts_cam1, pts_world, cv2.RANSAC)
+self.H2, _ = cv2.findHomography(pts_cam2, pts_world, cv2.RANSAC)
+
+def is_ball_on_floor(self, pixel_cam1, pixel_cam2, epsilon=5.0):
+    world_p1 = cv2.perspectiveTransform(p1, self.H1)[0][0]
+    world_p2 = cv2.perspectiveTransform(p2, self.H2)[0][0]
+    distance = np.linalg.norm(world_p1 - world_p2)
+    return distance <= epsilon, distance, world_p1, world_p2
+\end{Verbatim}
+\end{otherlanguage*}
+\end{codebox}
+
+השימוש ב־\textenglish{RANSAC} מאפשר עמידות לטעויות מדידה בודדות בשלב הכיול.
+
+% =========================================================
+\section{שלבי הכיול}
+
+המערכת דורשת מספר שלבי כיול עוקבים. כל שלב פותר בעיה אחרת:
+
+\subsection{שלב 0: כיול \textenglish{HSV} חיצוני}
+מתבצע פעם אחת באמצעות \textenglish{Calibration Helper script.py}. מפעיל \textenglish{GUI} עם שישה \textenglish{sliders} (\textenglish{H, S, V} עבור החסם התחתון והעליון):
+\begin{itemize}[leftmargin=2em]
+    \item מציג את הפריים החי ואת המסיכה הבינארית זה לצד זה.
+    \item המשתמש מסובב את ה־\textenglish{sliders} עד שהכדור מופיע לבן מלא והרקע שחור מלא.
+    \item התוצאה נשמרת ב־\textenglish{ball\_config.json} עם פרופיל נפרד לכל מצלמה.
+\end{itemize}
+
+\subsection{שלב 1: כיול רקע -- מקש \textenglish{B}}
+איפוס מודל \textenglish{MOG2}. השחקן יוצא מהפריים, לוחץ \textenglish{B}, והמערכת בונה מחדש את מודל הרקע:
+
+\begin{codebox}
+\begin{otherlanguage*}{english}
+\begin{Verbatim}[fontsize=\small, formatcom=\codefont]
+def set_instant_background(self, frame):
+    self.fgbg = cv2.createBackgroundSubtractorMOG2(
+        history=CONFIG["background"].get("mog2_history", 500),
+        varThreshold=CONFIG["background"].get("mog2_threshold", 25),
+        detectShadows=False
+    )
+\end{Verbatim}
+\end{otherlanguage*}
+\end{codebox}
+
+\subsection{שלב 2: כיול רדיוס -- מקש \textenglish{S}}
+המשתמש מניח את הכדור על הרצפה ולוחץ \textenglish{S}. המערכת:
+\begin{enumerate}[leftmargin=2em]
+    \item מבטלת זמנית את \textenglish{MOG2} (זיהוי ב־\textenglish{HSV} בלבד --- הכדור עומד במקום).
+    \item אוספת \textbf{15 דגימות} של רדיוס הכדור.
+    \item מחשבת את \textbf{החציון} (יציב לחריגים) כרדיוס הבסיסי.
+    \item מעדכנת את פרמטרי \textenglish{Hough} לטווח של $\pm 50\%$ מרדיוס זה.
+\end{enumerate}
+
+\textbf{הסיבה לחציון ולא ממוצע:} עמידות לזיהויים שגויים בודדים.
+
+\subsection{שלב 3: כיול רצפה ב־12 נקודות -- מקש \textenglish{F}}
+זהו הכיול הקריטי ביותר. מתבצע באופן אינטראקטיבי:
+
+\begin{enumerate}[leftmargin=2em]
+    \item המערכת מציגה רשת של \textbf{12 נקודות} ($3 \times 4$) על הרצפה האמיתית.
+    \item הקואורדינטות בעולם הן: $X \in \{0, 33, 67, 100\}$ ס״מ, $Y \in \{0, 50, 100\}$ ס״מ.
+    \item המשתמש מניח את הכדור בכל נקודה, מאמת זיהוי בשתי המצלמות, ולוחץ \textenglish{SPACE}.
+    \item לאחר 12 נקודות, המערכת מחשבת שתי מטריצות הומוגרפיה (אחת לכל מצלמה).
+    \item התוצאה נשמרת ב־\textenglish{floor\_calibration.json}.
+\end{enumerate}
+
+\begin{warnbox}
+\textbf{שים לב:} במהלך הכיול נעשה שימוש ב\textbf{זיהוי \textenglish{HSV} בלבד} (\textenglish{MOG2} מבוטל). הסיבה: הכדור עומד במקום, ולכן מסנן התנועה היה מסלק אותו לחלוטין.
+\end{warnbox}
+
+\subsection{שלב 4: כיול נגיעת ראש -- מקש \textenglish{H}, אופציונלי}
+השחקן מניח את הכדור על ראשו, לוחץ \textenglish{H}, והמערכת מחשבת את הרדיוס המינימלי של הכדור במצלמה העליונה (כאשר הוא קרוב למצלמה). זהו ה־\textbf{\textenglish{baseline}} לזיהוי נגיעות ראש: כאשר הרדיוס גדל מעבר לסף זה ולאחר ירידה --- זוהי נגיעת ראש.
+
+\subsection{שלב 5: כוונון קו רצפה ידני}
+לאחר הכיולים האוטומטיים, המשתמש יכול לכוונן את הרצפה ידנית בזמן ריצה:
+\begin{itemize}[leftmargin=2em]
+    \item \textenglish{A / Z} --- הזזת עוגן שמאלי למעלה או למטה.
+    \item \textenglish{UP / DOWN} --- הזזת עוגן ימני (חלופה: \textenglish{K / M}).
+    \item \textenglish{[ / ]} --- הזזת קצוות הרצפה במישור $X$.
+    \item \textenglish{+/-} --- כוונון \textenglish{epsilon} (סובלנות ההסכמה בין המצלמות) בקפיצות של $0.5$ ס״מ.
+\end{itemize}
+
+% =========================================================
+\section{לוגיקת זיהוי בעיטה ונפילה}
+
+\subsection{זיהוי בעיטה -- \textenglish{Velocity Flip}}
+המערכת עוקבת אחר היסטוריית מהירות הכדור בציר $Y$ (אנכי). \textbf{בעיטה} = רצף שבו הכדור היה בנפילה ולפתע מתחיל לעלות:
+
+\begin{codebox}
+\begin{otherlanguage*}{english}
+\begin{Verbatim}[fontsize=\small, formatcom=\codefont]
+if current_vel > 0:   # falling
+    self.fall_counter += 1
+    self.rise_counter = 0
+    if self.fall_counter >= self.required_inertia_frames:
+        self.is_falling = True
+elif current_vel <= min_hit_vel:   # rising
+    self.rise_counter += 1
+    self.fall_counter = 0
+
+# V-Flip: was falling, now rising for 2+ frames
+is_normal_hit = (self.rise_counter >= 2) and self.is_falling
+\end{Verbatim}
+\end{otherlanguage*}
+\end{codebox}
+
+\textbf{דרישת \textenglish{inertia\_frames}} מונעת זיהוי שווא של רעידות מצלמה כבעיטה.
+
+\subsection{בעיטה ראשונה -- \textenglish{Flick Up}}
+לפני שהכדור באוויר, אין \textbf{נפילה} שתקדים את העלייה. ולכן הבעיטה הראשונה דורשת:
+\begin{enumerate}[leftmargin=2em]
+    \item \textenglish{rise\_counter $\geq 3$}.
+    \item מעבר של 15 פיקסלים לפחות כלפי מעלה בשלושה פריימים.
+\end{enumerate}
+
+\subsection{זיהוי נפילה לרצפה -- שלוש שיטות במקביל}
+
+\subsubsection{שיטה 1: הומוגרפיה (מועדפת)}
+אם הכיול ב־12 נקודות הצליח, המערכת בודקת בכל פריים האם שתי המצלמות מסכימות שהכדור על הרצפה (מרחק קטן מ־\textenglish{epsilon}):
+
+\begin{codebox}
+\begin{otherlanguage*}{english}
+\begin{Verbatim}[fontsize=\small, formatcom=\codefont]
+on_ground, distance, _, _ = self.floor_finder.is_ball_on_floor(
+    pixel_top, pixel_side, epsilon=self.floor_epsilon_cm
+)
+if on_ground:
+    return "DROP"
+\end{Verbatim}
+\end{otherlanguage*}
+\end{codebox}
+
+\subsubsection{שיטה 2: קו רצפה ליניארי (\textenglish{fallback})}
+אם ההומוגרפיה לא כויילה, המערכת משתמשת בקו רצפה דמיוני בין שני עוגנים:
+\begin{english}
+\[
+\text{floor\_y}(x) = \text{floor\_left\_y} + (\text{floor\_right\_y} - \text{floor\_left\_y}) \cdot \frac{x}{w-1}
+\]
+\end{english}
+
+\subsubsection{שיטה 3: ניתוח רטרואקטיבי של תזמון פגיעות}
+כאשר הכדור \textbf{קופא במקום} למשך 30 פריימים, המערכת מנתחת את היסטוריית הפגיעות האחרונות:
+
+\begin{codebox}
+\begin{otherlanguage*}{english}
+\begin{Verbatim}[fontsize=\small, formatcom=\codefont]
+for i in range(len(recent_hits) - 1, 0, -1):
+    delta_t = recent_hits[i] - recent_hits[i-1]
+    if delta_t < 0.35:   # too fast for a human kick
+        invalid_hits += 1
+        floor_chain_detected = True
+    elif delta_t < 0.60:   # gray zone
+        if i > 1:
+            delta_t_older = recent_hits[i-1] - recent_hits[i-2]
+            if delta_t < delta_t_older - 0.05:   # shrinking interval
+                invalid_hits += 1
+\end{Verbatim}
+\end{otherlanguage*}
+\end{codebox}
+
+\textbf{עיקרון פיזיקלי:} בעיטה אמיתית של אדם יוצרת קצב יחסית קבוע ($\sim 0.7$ שניות), בעוד שכדור הקופץ מהרצפה מאבד אנרגיה והאינטרוולים הולכים ומתקצרים (\textenglish{restitution decay}). המערכת מזהה תבנית זו ומחסירה את הקפיצות השגויות מהציון.
+
+\subsection{זיהוי נגיעת ראש -- \textenglish{Header}}
+נגיעת ראש מתבצעת באנכי --- הכדור נופל \textbf{מלמעלה אל הראש} ועולה חזרה. במצלמה העליונה, נגיעת ראש מתבטאת ב\textbf{שינוי רדיוס}:
+\begin{enumerate}[leftmargin=2em]
+    \item הכדור נופל ומתרחק מהמצלמה $\rightarrow$ הרדיוס \textbf{מצטמצם}.
+    \item הוא מתקרב לראש $\rightarrow$ הרדיוס \textbf{גדל}.
+    \item נגיעה $\rightarrow$ העלייה בעקבות הצטמצמות.
+\end{enumerate}
+
+% =========================================================
+\section{מנגנונים נוספים}
+
+\subsection{טיפול בחסימות -- \textenglish{Lost Frame Handling}}
+המערכת סופרת \textenglish{lost\_frames} --- פריימים רצופים ללא זיהוי. הזמן המקסימלי מותאם להקשר:
+\begin{itemize}[leftmargin=2em]
+    \item ברירת מחדל: 30 פריימים.
+    \item אם הכדור היה גבוה (\textenglish{y < 100}) ובעלייה (\textenglish{vel < 0}) --- הטיימאאוט מוארך ל־90 פריימים (הכדור בוודאי באוויר מעל המסגרת).
+\end{itemize}
+
+\subsection{שער רדיוס -- \textenglish{Radius Gate}}
+זיהויים שהרדיוס שלהם חורג מהטווח $[0.5R_b, 1.5R_b]$ נדחים אוטומטית. זה מסנן זיהויים שגויים של אובייקטים אחרים (פנים, ידיים).
+
+\subsection{משחק רב משתתפים}
+\begin{itemize}[leftmargin=2em]
+    \item מקש \textenglish{T} --- ספירה לאחור של 3 שניות ותחילת המשחק.
+    \item מקש \textenglish{N} --- מעבר בין שחקנים, שמירת תוצאה.
+    \item לאחר ששני השחקנים שיחקו --- מוצג מסך מנצח.
+    \item התוצאות נשמרות ב־\textenglish{evaluation\_log.csv} עם אחוז דיוק (\textenglish{Clean Play \%}).
+\end{itemize}
+
+\subsection{משוב קולי}
+בעת זיהוי נפילה, המערכת מנגנת קובץ \textenglish{referee-whistle-sound-effect.mp3} ב־\textenglish{pygame} בתהליכון נפרד כדי לא לחסום את הלולאה הראשית.
+
+% =========================================================
+\section{תצוגה וויזואליזציה}
+
+\subsection{\textenglish{Floor Overlay}}
+המערכת מציירת על שני הפריימים את רשת ה־12 נקודות שכוילה:
+\begin{itemize}[leftmargin=2em]
+    \item ארבעת הפינות יוצרות מצולע (\textenglish{polygon}) מלא שקוף.
+    \item הקווים האופקיים והאנכיים מצוירים בין הנקודות.
+    \item הצבע משתנה לאדום למשך חצי שנייה לאחר זיהוי נפילה --- משוב ויזואלי מיידי.
+\end{itemize}
+
+\subsection{הודעות תוצאה}
+\begin{itemize}[leftmargin=2em]
+    \item \textenglish{+1} מופיע במרכז המסך לאחר כל בעיטה ועולה למעלה בהדרגה תוך שנייה אחת (\textenglish{fade-out}).
+    \item תיבת \textenglish{P1: X | P2: Y} בפינה הימנית העליונה מציגה את ציוני שני השחקנים.
+    \item \textenglish{DROP! GAME OVER} מוצג במרכז המסך בצבע אדום.
+\end{itemize}
+
+% =========================================================
+\section{קבצי קונפיגורציה}
+
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{\textenglish{config.py}} --- קונפיגורציה סטטית (פרמטרים שלא משתנים בריצה).
+    \item \textbf{\textenglish{ball\_config.json}} --- גבולות \textenglish{HSV} לכל מצלמה (נשמרים בכלי הכיול).
+    \item \textbf{\textenglish{floor\_calibration.json}} --- 12 נקודות הכיול במישור העולם ובשתי המצלמות.
+    \item \textbf{\textenglish{runtime\_config.json}} --- פרמטרים שמשתנים בזמן ריצה (כגון \textenglish{floor\_epsilon\_cm}).
+    \item \textbf{\textenglish{evaluation\_log.csv}} --- לוג תוצאות משחקים: ציון, דדאקציות, משך, אחוז דיוק.
+\end{itemize}
+
+% =========================================================
+\section{הערכה -- \textenglish{Evaluation}}
+
+הפרויקט כולל מערכת הערכה אובייקטיבית:
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{\textenglish{capture\_eval\_frames.py}} --- לכידת פריימים לסט בדיקה.
+    \item \textbf{\textenglish{generate\_ground\_truth.py}} --- יצירת תיוג ידני לפריימים.
+    \item \textbf{\textenglish{evaluate\_segmentation.py}} --- חישוב מדדים (\textenglish{IoU, Precision, Recall}) של איכות הסגמנטציה מול ה־\textenglish{ground truth}.
+    \item \textbf{\textenglish{run\_pipeline.py}} --- הרצת הצינור על סט הבדיקה.
+\end{itemize}
+
+% =========================================================
+\section{סיכום ומסקנות}
+
+הפרויקט משלב מספר טכניקות ראייה ממוחשבת קלאסיות לפתרון בעיה מעשית, תוך התמודדות עם אתגרים אמיתיים של זיהוי אובייקט מהיר:
+
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{שילוב מרובה שיטות} --- \textenglish{HSV + MOG2 + Hough + Kalman + Homography} --- כל שיטה משלימה את החולשות של האחרות.
+    \item \textbf{שתי מצלמות} --- מאפשרות הסכמה גיאומטרית ומפחיתות \textenglish{False Positives}.
+    \item \textbf{כיולים מדורגים} --- כל שלב פותר בעיה ספציפית, וניתן לדלג על שלבים אופציונליים.
+    \item \textbf{ניתוח רטרואקטיבי} --- שימוש בפיזיקה של קפיצות־רצפה לזיהוי בדיעבד של נפילות לא מזוהות.
+    \item \textbf{ארכיטקטורה מודולרית} --- הפרדה ברורה בין רכישה, עיבוד, לוגיקה והצגה.
+\end{enumerate}
+
+המערכת הוכיחה את עצמה ככלי שימושי לאימון ז'אנגלינג ולתחרויות בלתי פורמליות, עם משוב בזמן אמת ותחזוקה נמוכה לאחר הכיול הראשוני.
+
+\vspace{2em}
+\hrule
+\vspace{1em}
+\begin{center}
+\textit{מסמך זה נוצר אוטומטית מקוד המקור של הפרויקט.}
+\end{center}
+
+\end{document}

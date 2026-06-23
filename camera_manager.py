@@ -1,0 +1,86 @@
+import cv2
+from threading import Thread
+import time
+from config import CONFIG
+
+class CameraManager:
+    """
+    Threaded camera reader. A background thread continuously grabs the latest
+    frame so the main loop never blocks on I/O.
+    """
+
+    def __init__(self, src=0, name="Camera"):
+        self.src = src
+        self.name = name
+        self.stream = cv2.VideoCapture(self.src)
+        
+        target_w = CONFIG["camera"]["width"]
+        target_h = CONFIG["camera"]["height"]
+        self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, target_w)
+        self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, target_h)
+        
+        if not self.stream.isOpened():
+            print(f"[ERROR] Cannot open camera: {self.src}")
+            self.stopped = True
+            self.grabbed = False
+            self.frame = None
+            return
+
+        (self.grabbed, self.frame) = self.stream.read()
+        self.stopped = False
+
+    def start(self):
+        if self.stopped: 
+            return self
+        print(f"[INFO] Camera thread '{self.name}' started.")
+        t = Thread(target=self._update, name=self.name, daemon=True)
+        t.start()
+        return self
+
+    def _update(self):
+        while True:
+            if self.stopped:
+                return
+            (grabbed, frame) = self.stream.read()
+            if not grabbed:
+                if isinstance(self.src, str): 
+                    print(f"[INFO] Video '{self.name}' ended — looping.")
+                    self.stream.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
+                else:
+                    print(f"[WARNING] '{self.name}' failed to grab frame. Stopping.")
+                    self.stopped = True
+                    return
+            self.grabbed = grabbed
+            self.frame = frame
+
+    def read(self):
+        return self.frame
+
+    def stop(self):
+        self.stopped = True
+        time.sleep(0.1)
+        self.stream.release()
+        print(f"[INFO] Camera '{self.name}' released.")
+
+
+class DualCameraManager:
+    """Manages top and side CameraManager instances together."""
+
+    def __init__(self):
+        top_src = CONFIG["camera"]["top_source"]
+        side_src = CONFIG["camera"]["side_source"]
+        self.cam_top = CameraManager(src=top_src, name="TopCam")
+        self.cam_side = CameraManager(src=side_src, name="SideCam")
+
+    def start(self):
+        self.cam_top.start()
+        self.cam_side.start()
+        return self
+
+    def read(self):
+        return self.cam_top.read(), self.cam_side.read()
+
+    def stop(self):
+        self.cam_top.stop()
+        self.cam_side.stop()

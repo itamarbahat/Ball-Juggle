@@ -1,0 +1,28 @@
+# Keep Claude focused on the source code and config that matter for running
+# and improving the project. Exclude bulky binaries and generated data.
+
+# ---- Python caches / build ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- Large binary reports (already summarized in README / CLAUDE.md) ----
+*.pdf
+
+# ---- Evaluation image data (large; not needed to reason about the code) ----
+evaluation/eval_input/
+evaluation/frames/
+evaluation/ground_truth/
+evaluation/pipeline_hough/
+evaluation/pipeline_masks/
+*.png
+*.jpg
+*.jpeg
+*.mp4
+*.mp3
+
+# ---- Runtime logs ----
+evaluation_log.csv
+*.log

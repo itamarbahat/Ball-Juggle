@@ -1,0 +1,13 @@
+[project]
+name = "juggle-counter"
+version = "0.1.0"
+description = "A real-time juggling counter using dual-camera computer vision"
+dependencies = [
+    "opencv-python",
+    "numpy",
+    "pygame",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
