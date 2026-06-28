@@ -13,6 +13,8 @@ screen, or any resized / full-screen window.
 """
 
 import cv2
+import os
+import sys
 import numpy as np
 import pygame
 import time
@@ -77,17 +79,40 @@ class Dashboard:
     """Owns the single pygame window and draws the entire on-screen experience."""
 
     def __init__(self, width=1920, height=1080):
+        # Center the window on the primary monitor so it can't open off-screen.
+        os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
+
+        # On Windows, declare the process DPI-aware BEFORE creating the window so a
+        # 1920x1080 window maps to 1920x1080 *physical* pixels. Without this, display
+        # scaling (e.g. 125% / 150%) inflates the window well past the screen edges.
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)   # per-monitor v2
+            except Exception:
+                try:
+                    ctypes.windll.user32.SetProcessDPIAware()
+                except Exception:
+                    pass
+
         pygame.init()
         pygame.font.init()
 
-        self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
+        # Clamp the window to the usable desktop so it never overflows the screen,
+        # leaving headroom for the title bar and taskbar. Capped at the requested
+        # 1920x1080. The layout is fully responsive, so a smaller window is fine.
+        desktop = pygame.display.Info()
+        win_w = min(width, desktop.current_w - 16)
+        win_h = min(height, desktop.current_h - 80)
+
+        self.screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
         pygame.display.set_caption("Juggling Counter — Live")
         self.clock = pygame.time.Clock()
 
         # Fonts (scaled lazily to the window in _ensure_fonts)
         self._font_cache = {}
         self._fonts_for_h = -1
-        self._ensure_fonts(height)
+        self._ensure_fonts(win_h)
 
         # ---- state set by main.py every frame (no logic lives here) ----
         self.cal = {key: False for _, key, _ in CAL_STEPS}
@@ -98,6 +123,16 @@ class Dashboard:
         self.game_state = "WAITING"
         self.floor_epsilon_cm = 5.0
         self.color_only = False
+
+        # Help / instructions popup (opened by F1 or the "? HELP" header button).
+        self.show_help = False
+        self._help_btn_rect = None
+
+        # Live B/W detection view (opened by V or the "B/W MASK" header button).
+        # main.py drops the latest combined mask image here each frame while active.
+        self.show_mask = False
+        self.mask_frame = None
+        self._mask_btn_rect = None
 
         # transient overlays (timestamps in time.time() seconds)
         self.countdown_text = ""
@@ -203,20 +238,52 @@ class Dashboard:
         info_rect = (right_x, info_top, right_w, content_bot - info_top)
         self._draw_info_panel(info_rect, now)
 
+        # Modal overlays, drawn on top of everything else.
+        if self.show_mask:
+            self._draw_mask_overlay(W, H)
+        if self.show_help:
+            self._draw_help_overlay(W, H)
+
         pygame.display.flip()
         self.clock.tick(60)
 
     # ------------------------------------------------------------------ #
     #  Header / status                                                   #
     # ------------------------------------------------------------------ #
+    def _pill_button(self, rect, label, active=False):
+        """Draws a rounded clickable pill. `active` tints it when its popup is open."""
+        hover = rect.collidepoint(pygame.mouse.get_pos())
+        if active:
+            fill = (30, 70, 92)
+        elif hover:
+            fill = C_BORDER
+        else:
+            fill = C_PANEL2
+        pygame.draw.rect(self.screen, fill, rect, border_radius=rect.height // 2)
+        pygame.draw.rect(self.screen, C_CYAN, rect, 1, border_radius=rect.height // 2)
+        self._text(label, self.f_hint, C_CYAN, rect.center, anchor="center")
+
     def _draw_header(self, W, h):
         pygame.draw.rect(self.screen, C_PANEL, (0, 0, W, h))
         pygame.draw.line(self.screen, C_BORDER, (0, h), (W, h), 1)
         self._text("JUGGLING COUNTER", self.f_title, C_CYAN, (16, h // 2),
                    anchor="midleft")
+
+        # Header buttons, laid out right-to-left. Rects are stored so poll_events()
+        # can hit-test mouse clicks against them.
+        bh = int(h * 0.56)
+        by = (h - bh) // 2
+        gap = 8
+        self._help_btn_rect = pygame.Rect(W - int(bh * 3.4) - 14, by, int(bh * 3.4), bh)
+        self._mask_btn_rect = pygame.Rect(
+            self._help_btn_rect.left - gap - int(bh * 4.4), by, int(bh * 4.4), bh)
+        self._pill_button(self._mask_btn_rect, "B/W MASK", active=self.show_mask)
+        self._pill_button(self._help_btn_rect, "?  HELP", active=self.show_help)
+
         hints = ("T Start   N Next   R Reset   |   1 HSV  B Bg  S Radius  "
-                 "F Floor   |   G Grid  V Mask  D Color   ESC Exit")
-        self._text(hints, self.f_hint, C_DIM, (W - 14, h // 2), anchor="midright")
+                 "F Floor   |   G Grid  V Mask  D Color   F1 Help   ESC Exit")
+        self._text(hints, self.f_hint, C_DIM,
+                   (self._mask_btn_rect.left - 16, h // 2), anchor="midright")
 
     def _draw_status_bar(self, W, H, h):
         y = H - h
@@ -316,8 +383,15 @@ class Dashboard:
         y += int(self.f_head.get_height() * 1.4)
         row_h = max(int(self.f_body.get_height() * 1.55), 26)
         for label, key, hint in CAL_STEPS:
-            done = self.cal.get(key, False)
-            box_c = C_GREEN if done else C_DIM
+            # Tri-state: falsy = not done, "saved" = loaded from a config file,
+            # any other truthy value ("session"/True) = calibrated this run.
+            state = self.cal.get(key, False)
+            if state in ("saved", "SAVED"):
+                box_c, hint_c, hint_txt, done = C_CYAN, C_CYAN, "saved", True
+            elif state:
+                box_c, hint_c, hint_txt, done = C_GREEN, C_GREEN, "ready", True
+            else:
+                box_c, hint_c, hint_txt, done = C_DIM, C_ORANGE, hint, False
             pygame.draw.rect(self.screen, box_c, (x, y + 2, 18, 18),
                              0 if done else 2, border_radius=4)
             if done:
@@ -326,8 +400,6 @@ class Dashboard:
                                    (x + 15, y + 5)], 2)
             self._text(label, self.f_body, C_TEXT if done else C_DIM,
                        (x + 28, y + 11), anchor="midleft")
-            hint_c = C_GREEN if done else C_ORANGE
-            hint_txt = "ready" if done else hint
             self._text(hint_txt, self.f_small, hint_c, (x + w, y + 11),
                        anchor="midright")
             y += row_h
@@ -389,16 +461,134 @@ class Dashboard:
                    (x + w - 12, y + h // 2), anchor="midright")
 
     # ------------------------------------------------------------------ #
+    #  Live B/W detection view                                           #
+    # ------------------------------------------------------------------ #
+    def _draw_mask_overlay(self, W, H):
+        """Centered live view of the post-morphology detection mask (B/W).
+
+        `self.mask_frame` is a BGR image built by main.py's build_mask_view().
+        It refreshes every frame, so this view is live while it stays open.
+        """
+        ov = pygame.Surface((W, H), pygame.SRCALPHA)
+        ov.fill((0, 0, 0, 200))
+        self.screen.blit(ov, (0, 0))
+
+        pw = int(min(W * 0.86, 1500))
+        ph = int(min(H * 0.78, 760))
+        px = (W - pw) // 2
+        py = (H - ph) // 2
+        self._panel((px, py, pw, ph), fill=C_PANEL, border=C_CYAN, radius=14)
+
+        pad = int(pw * 0.025)
+        title_h = self.f_head.get_height()
+        self._text("LIVE DETECTION  (B/W, after morphology + filters)",
+                   self.f_head, C_CYAN, (px + pad, py + pad))
+        self._text("press V or click to close", self.f_small, C_DIM,
+                   (px + pw - pad, py + pad + title_h // 2), anchor="midright")
+
+        img_area = (px + pad, py + pad + int(title_h * 1.8),
+                    pw - pad * 2, ph - pad * 2 - int(title_h * 1.8))
+        if self.mask_frame is not None and img_area[2] > 4 and img_area[3] > 4:
+            fh, fw = self.mask_frame.shape[:2]
+            ix, iy, iw, ih = _fit(img_area, fw / fh)
+            self.screen.blit(_bgr_surf(self.mask_frame, (iw, ih)), (ix, iy))
+            pygame.draw.rect(self.screen, C_BORDER, (ix, iy, iw, ih), 1)
+        else:
+            ax, ay, aw, ah = img_area
+            self._text("WARMING UP...", self.f_head, C_YELLOW,
+                       (ax + aw // 2, ay + ah // 2), anchor="center")
+
+    # ------------------------------------------------------------------ #
+    #  Help / instructions popup                                         #
+    # ------------------------------------------------------------------ #
+    def _draw_help_overlay(self, W, H):
+        """Centered modal that explains the calibration steps and hotkeys."""
+        ov = pygame.Surface((W, H), pygame.SRCALPHA)
+        ov.fill((0, 0, 0, 185))
+        self.screen.blit(ov, (0, 0))
+
+        pw = int(min(W * 0.74, 1120))
+        ph = int(min(H * 0.88, 840))
+        px = (W - pw) // 2
+        py = (H - ph) // 2
+        self._panel((px, py, pw, ph), fill=C_PANEL, border=C_CYAN, radius=14)
+
+        pad = int(pw * 0.045)
+        x = px + pad
+        y = py + pad
+        title_h = self.f_state.get_height()
+
+        self._text("HOW TO CALIBRATE & PLAY", self.f_state, C_CYAN, (x, y))
+        self._text("press any key or click to close", self.f_small, C_DIM,
+                   (px + pw - pad, y + title_h // 2), anchor="midright")
+        y += int(title_h * 1.7)
+
+        H1, B, S = self.f_head, self.f_body, self.f_small
+        lines = [
+            ("CALIBRATION  -  do these in order:", H1, C_YELLOW),
+            ("1.  HSV COLOR    Press 1  ->  6 sliders. Make the ball WHITE and the", B, C_TEXT),
+            ("                 background BLACK, then press ESC to save.", B, C_DIM),
+            ("2.  BACKGROUND   Step out of the frame and press B.", B, C_TEXT),
+            ("3.  BALL RADIUS  Put the ball on the floor and press S.", B, C_TEXT),
+            ("4.  FLOOR GRID   Press F. Put the ball on each of the 12 floor marks", B, C_TEXT),
+            ("                 and press SPACE at each (the ball must be visible in", B, C_DIM),
+            ("                 BOTH cameras).   BACKSPACE = undo,   ESC = cancel.", B, C_DIM),
+            ("", B, C_DIM),
+            ("FINE-TUNE THE FLOOR LINE", H1, C_CYAN),
+            ("A / Z  left anchor      UP / DOWN  right anchor      [  ]  left edge", B, C_TEXT),
+            ("'  \\  right edge        - / +  floor-agreement epsilon", B, C_TEXT),
+            ("", B, C_DIM),
+            ("GAMEPLAY", H1, C_CYAN),
+            ("T  start (3-second countdown)     N  next player     R  reset score", B, C_TEXT),
+            ("", B, C_DIM),
+            ("The HSV and FLOOR checks show CYAN \"saved\" when loaded from a file,", S, C_DIM),
+            ("and GREEN \"ready\" after you calibrate them in this session.", S, C_DIM),
+        ]
+        for text, font, color in lines:
+            if not text:
+                y += int(B.get_height() * 0.5)
+                continue
+            self._text(text, font, color, (x, y))
+            y += int(font.get_height() * 1.34)
+
+    # ------------------------------------------------------------------ #
     #  Input                                                             #
     # ------------------------------------------------------------------ #
     def poll_events(self):
-        """Return a list of pygame key codes pressed since the last call."""
+        """Return a list of pygame key codes pressed since the last call.
+
+        The help popup and the live B/W mask view are handled here
+        (presentation-only): F1 / V or the header buttons open them, and while
+        one is open it is modal — any key or click dismisses it and that input is
+        swallowed so it can't trigger an action.
+        """
         keys = []
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 keys.append(pygame.K_ESCAPE)
             elif event.type == pygame.KEYDOWN:
+                if self.show_help or self.show_mask:   # modal: any key closes it
+                    self.show_help = False
+                    self.show_mask = False
+                    continue
+                if event.key == pygame.K_F1:
+                    self.show_help = True
+                    continue
+                if event.key == pygame.K_v:
+                    self.show_mask = True
+                    continue
                 keys.append(event.key)
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                p = event.pos
+                if self._help_btn_rect and self._help_btn_rect.collidepoint(p):
+                    self.show_help = not self.show_help
+                    self.show_mask = False
+                elif self._mask_btn_rect and self._mask_btn_rect.collidepoint(p):
+                    self.show_mask = not self.show_mask
+                    self.show_help = False
+                elif self.show_help or self.show_mask:
+                    self.show_help = False
+                    self.show_mask = False
         return keys
 
     def set_toast(self, text, until):

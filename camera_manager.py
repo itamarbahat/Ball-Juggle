@@ -1,4 +1,5 @@
 import cv2
+import sys
 from threading import Thread
 import time
 from config import CONFIG
@@ -12,8 +13,15 @@ class CameraManager:
     def __init__(self, src=0, name="Camera"):
         self.src = src
         self.name = name
-        self.stream = cv2.VideoCapture(self.src)
-        
+        # On Windows the default MSMF backend opens very slowly (~5 s per camera) and
+        # can appear to hang on the first .set()/read(); DirectShow opens in ~1 s and
+        # allows the same device index to be opened by both cameras. Webcam indices
+        # only — string sources (video files) keep the default backend.
+        if isinstance(self.src, int) and sys.platform == "win32":
+            self.stream = cv2.VideoCapture(self.src, cv2.CAP_DSHOW)
+        else:
+            self.stream = cv2.VideoCapture(self.src)
+
         target_w = CONFIG["camera"]["width"]
         target_h = CONFIG["camera"]["height"]
         self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, target_w)

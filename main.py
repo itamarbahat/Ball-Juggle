@@ -2,8 +2,10 @@ import cv2
 import numpy as np
 import time
 import os
+import sys
 import json
 import subprocess
+import threading
 import pygame
 from camera_manager import DualCameraManager
 from ball_processor import BallProcessor
@@ -477,23 +479,141 @@ def print_welcome_instructions():
     print("=" * 58)
 
 
+def _open_capture(idx, w, h):
+    cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW) if sys.platform == "win32" else cv2.VideoCapture(idx)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+    return cap
+
+
+def _cam_delivers(cap, tries=6):
+    """True if an open capture yields at least one real frame within `tries`."""
+    if not cap.isOpened():
+        return False
+    for _ in range(tries):
+        ok, frame = cap.read()
+        if ok and frame is not None:
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def _pair_delivers(a, b, w, h):
+    """True if indices a and b BOTH deliver frames while open simultaneously."""
+    ca, cb = _open_capture(a, w, h), _open_capture(b, w, h)
+    good = _cam_delivers(ca) and _cam_delivers(cb)
+    ca.release()
+    cb.release()
+    return good
+
+
+def _autodetect_camera_pair(pref_top, pref_side, w, h, max_index=5):
+    """Pick two camera indices that deliver frames *simultaneously*.
+
+    Webcam indices drift between runs on Windows, so the configured pair is verified
+    rather than trusted blindly. Order of preference:
+      1. the configured pair, if it still works together;
+      2. the first scanned pair that delivers simultaneously (configured indices first);
+      3. a single working camera mirrored into both panels;
+      4. the original values, if nothing is found.
+    Video-file (string) sources are returned unchanged.
+    """
+    if not (isinstance(pref_top, int) and isinstance(pref_side, int)):
+        return pref_top, pref_side
+
+    if pref_top != pref_side and _pair_delivers(pref_top, pref_side, w, h):
+        return pref_top, pref_side
+
+    order = []
+    for x in (pref_side, pref_top):
+        if x not in order:
+            order.append(x)
+    for i in range(max_index):
+        if i not in order:
+            order.append(i)
+
+    working = []
+    for idx in order:
+        cap = _open_capture(idx, w, h)
+        if _cam_delivers(cap):
+            working.append(idx)
+        cap.release()
+
+    for i, a in enumerate(working):
+        for b in working[i + 1:]:
+            if _pair_delivers(a, b, w, h):
+                return a, b
+
+    if working:
+        return working[0], working[0]
+    return pref_top, pref_side
+
+
 def main():
     """Main loop: reads dual-camera frames, processes, detects events, and displays."""
 
     print_welcome_instructions()
-
-    dual_cam = DualCameraManager().start()
-    processor_top = BallProcessor(camera_profile="top")
-    processor_side = BallProcessor(camera_profile="side")
-    floor_finder = FloorFinder()
-    game_logic = JugglingCounter(history_len=10, floor_finder=floor_finder)
-    print(f"[INFO] Floor epsilon: {game_logic.floor_epsilon_cm:.2f} cm")
 
     target_w = CONFIG["camera"]["width"]
     target_h = CONFIG["camera"]["height"]
 
     is_video_top = isinstance(CONFIG["camera"]["top_source"], str)
     is_video_side = isinstance(CONFIG["camera"]["side_source"], str)
+
+    ui = CONFIG["ui"]
+
+    # --- Create the dashboard window FIRST so it appears instantly -----------
+    # Opening a camera can block for many seconds on Windows — a missing or busy
+    # index takes ~15 s to fail. If cameras were opened before the window existed,
+    # the user would see a blank desktop the whole time and assume nothing happened.
+    # So we show the window immediately and open the cameras on a background thread
+    # while a responsive "Starting cameras..." loading screen is drawn.
+    dash = Dashboard()
+    dash.fps = 30 if (is_video_top or is_video_side) else 60
+    dash.hit_popup_sec = ui["hit_popup_sec"]
+    dash.game_state = "WAITING"
+
+    cam_box = {}
+    def _open_cameras():
+        try:
+            # Verify the configured pair, auto-detecting a working pair if it fails
+            # (webcam indices drift between runs on this machine).
+            top, side = _autodetect_camera_pair(
+                CONFIG["camera"]["top_source"],
+                CONFIG["camera"]["side_source"],
+                target_w, target_h)
+            CONFIG["camera"]["top_source"] = top
+            CONFIG["camera"]["side_source"] = side
+            print(f"[INFO] Cameras selected -> Side A (main)={side}, Side B (secondary)={top}")
+            cam_box["dual"] = DualCameraManager().start()
+        except Exception as e:                       # pragma: no cover
+            cam_box["error"] = e
+
+    cam_thread = threading.Thread(target=_open_cameras, daemon=True)
+    cam_thread.start()
+
+    while cam_thread.is_alive():
+        dash.set_toast("Starting cameras...", time.time() + 5)
+        dash.draw(None, None)
+        for key in dash.poll_events():
+            if key == pygame.K_ESCAPE:               # allow quitting during load
+                cam_thread.join(timeout=20)
+                if cam_box.get("dual"):
+                    cam_box["dual"].stop()
+                dash.close()
+                return
+
+    dual_cam = cam_box.get("dual")
+    if dual_cam is None:
+        print(f"[ERROR] Camera initialisation failed: {cam_box.get('error')}")
+        dash.close()
+        return
+
+    processor_top = BallProcessor(camera_profile="top")
+    processor_side = BallProcessor(camera_profile="side")
+    floor_finder = FloorFinder()
+    game_logic = JugglingCounter(history_len=10, floor_finder=floor_finder)
+    print(f"[INFO] Floor epsilon: {game_logic.floor_epsilon_cm:.2f} cm")
 
     _, floor_pts_top, floor_pts_side = load_floor_points()
     show_floor_overlay = True
@@ -504,20 +624,19 @@ def main():
     score_p1 = 0
     score_p2 = 0
 
-    ui = CONFIG["ui"]
+    # Tri-state checklist: HSV and Floor can be loaded from a config file, so on
+    # startup they read "saved" (cyan) rather than "ready" (green) — the green
+    # "calibrated this session" state is only set when the operator re-runs them
+    # below. Background and Radius are never persisted, so they stay session-only.
+    dash.cal["hsv"] = "saved" if _check_hsv_calibrated() else False
+    dash.cal["floor"] = "saved" if getattr(floor_finder, "calibrated", False) else False
+    dash.cal["radius"] = "session" if game_logic.baseline.get("is_set", False) else False
+    dash.set_toast("", 0.0)                          # clear the loading toast
 
-    # --- Dashboard (pure presentation + input; no game logic) ---
-    dash = Dashboard()
-    dash.fps = 30 if (is_video_top or is_video_side) else 60
-    dash.hit_popup_sec = ui["hit_popup_sec"]
-    dash.cal["hsv"] = _check_hsv_calibrated()
-    dash.cal["floor"] = getattr(floor_finder, "calibrated", False)
-    dash.cal["radius"] = game_logic.baseline.get("is_set", False)
-
-    # B/W detection-mask debug window (toggled with V). Lives as a separate cv2
-    # window; needs cv2.waitKey to pump its GUI loop, handled in the main loop.
-    show_mask_window = ui["show_mask_window"]
-    mask_window_placed = False
+    # Live B/W detection-mask view (toggled with V or the dashboard "B/W MASK"
+    # button). Rendered *inside* the pygame dashboard — main.py only feeds it the
+    # latest combined mask image each frame (see dash.mask_frame below).
+    dash.show_mask = ui["show_mask_window"]
 
     # game-state timers read by the state machine below
     gameover_until = 0.0
@@ -528,12 +647,17 @@ def main():
     while running:
         frame_top_raw, frame_side_raw = dual_cam.read()
 
-        if frame_top_raw is None or frame_side_raw is None:
-            print("[WARNING] End of stream or camera failure.")
-            break
-
-        frame_top = cv2.resize(frame_top_raw, (target_w, target_h), interpolation=cv2.INTER_AREA)
-        frame_side = cv2.resize(frame_side_raw, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        # Resilient to a feed that isn't delivering frames — e.g. only one physical
+        # camera present, a camera still warming up, or one source failing. Keep the
+        # dashboard window open and show a "WARMING UP" panel for the missing feed
+        # instead of exiting the moment a single frame is None (the old behaviour,
+        # which made the window flash open and immediately close).
+        top_alive = frame_top_raw is not None
+        side_alive = frame_side_raw is not None
+        frame_top = (cv2.resize(frame_top_raw, (target_w, target_h), interpolation=cv2.INTER_AREA)
+                     if top_alive else np.zeros((target_h, target_w, 3), np.uint8))
+        frame_side = (cv2.resize(frame_side_raw, (target_w, target_h), interpolation=cv2.INTER_AREA)
+                      if side_alive else np.zeros((target_h, target_w, 3), np.uint8))
 
         if color_only_mode:
             processor_top.mog_bypass_frames = max(processor_top.mog_bypass_frames, 2)
@@ -614,16 +738,13 @@ def main():
         dash.floor_epsilon_cm = game_logic.floor_epsilon_cm
         dash.color_only = color_only_mode
 
-        # --- render the unified dashboard (Side A = main, Side B = secondary) ---
-        dash.draw(frame_side, frame_top)
+        # --- live B/W detection view: feed the dashboard the latest combined mask
+        #     image while the view is open (rendered inside the dashboard window) ---
+        dash.mask_frame = build_mask_view(mask_side, mask_top) if dash.show_mask else None
 
-        # --- optional B/W mask debug window (separate cv2 window) ---
-        if show_mask_window:
-            cv2.imshow("Detection (B/W Mask)", build_mask_view(mask_side, mask_top))
-            if not mask_window_placed:
-                cv2.moveWindow("Detection (B/W Mask)", 40, 600)
-                mask_window_placed = True
-            cv2.waitKey(1)   # pump the cv2 GUI loop so the window refreshes
+        # --- render the unified dashboard (Side A = main, Side B = secondary) ---
+        # Pass None for a dead feed so the dashboard shows "WARMING UP" for it.
+        dash.draw(frame_side if side_alive else None, frame_top if top_alive else None)
 
         # ------------------------------------------------------------------ #
         #  Input — all keys now come from pygame                             #
@@ -652,7 +773,7 @@ def main():
                     if wt is not None and ws is not None:
                         break
                     time.sleep(0.03)
-                dash.cal["hsv"] = _check_hsv_calibrated()
+                dash.cal["hsv"] = "session" if _check_hsv_calibrated() else False
                 dash.set_toast("HSV calibration updated", time.time() + ui["toast_sec"])
                 pygame.event.clear()
 
@@ -691,7 +812,7 @@ def main():
                 if new_ff and new_ff.calibrated:
                     floor_finder = new_ff
                     _, floor_pts_top, floor_pts_side = load_floor_points()
-                    dash.cal["floor"] = True
+                    dash.cal["floor"] = "session"
                 # Close the temporary floor-cal cv2 windows and discard queued keys.
                 for wname in ("Floor Cal - Camera Side A", "Floor Cal - Camera Side B"):
                     try:
@@ -715,16 +836,6 @@ def main():
                 state = "ON" if show_floor_overlay else "OFF"
                 print(f"[INPUT] Floor overlay: {state}")
                 dash.set_toast(f"Floor grid: {state}", time.time() + ui["toast_sec"])
-
-            elif key == pygame.K_v:
-                show_mask_window = not show_mask_window
-                if not show_mask_window:
-                    cv2.destroyWindow("Detection (B/W Mask)")
-                    cv2.waitKey(1)
-                    mask_window_placed = False
-                state = "ON" if show_mask_window else "OFF"
-                print(f"[INPUT] Detection mask window: {state}")
-                dash.set_toast(f"Mask window: {state}", time.time() + ui["toast_sec"])
 
             elif key == pygame.K_n:
                 if active_player == 1:

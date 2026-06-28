@@ -1,7 +1,10 @@
 CONFIG = {
     "camera": {
-        "top_source": 0,     # Camera Side B (secondary / slave)
-        "side_source": 0,    # Camera Side A (main / master)
+        "top_source": 1,     # Camera Side B (secondary) — PREFERRED index.
+        "side_source": 2,    # Camera Side A (main)       — PREFERRED index.
+                             # Webcam indices drift between runs on this PC, so main.py
+                             # verifies this pair at startup and auto-detects a working
+                             # pair if it fails. Run  python list_cameras.py  to inspect.
         "width": 640,
         "height": 360
     },
@@ -55,7 +58,9 @@ CONFIG = {
     # main.py. Does NOT affect detection, scoring, or any logic values above.
     "ui": {
         # window toggles (default state)
-        "show_mask_window": True,    # live black/white detection-mask window (key V)
+        "show_mask_window": False,   # B/W detection-mask window (key V). Off by default:
+                                     # a separate cv2 window steals keyboard focus from
+                                     # the pygame dashboard, which blocks all hotkeys.
         "show_pip": True,            # TOP feed inset into the SIDE stage window (key P)
 
         # event/overlay durations (seconds)
