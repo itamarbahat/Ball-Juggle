@@ -45,6 +45,11 @@ _STATE_COLOR = {
     "GAME OVER": C_RED,
 }
 
+# Floor-agreement epsilon slider range (cm) used by the EPSILON settings modal.
+EPS_MIN = 0.5
+EPS_MAX = 20.0
+EPS_STEP = 0.5
+
 # Calibration checklist: (display label, state key, key hint)
 CAL_STEPS = [
     ("HSV Color",   "hsv",        "press 1"),
@@ -124,6 +129,19 @@ class Dashboard:
         self.floor_epsilon_cm = 5.0
         self.color_only = False
 
+        # ---- EPSILON settings modal (its own pane, next to HSV) ----
+        # Owns a working copy of the floor-agreement epsilon while open: a slider,
+        # - / + buttons and the keys mutate `settings_eps`, and each change queues an
+        # ABSOLUTE target value. main.py drains them via take_epsilon_events() and
+        # applies each through game_logic.adjust_floor_epsilon() (no logic here).
+        self.show_settings = False
+        self.settings_eps = self.floor_epsilon_cm
+        self._settings_btn_rect = None          # header "EPSILON" pill
+        self._settings_slider_rect = None
+        self._settings_slider_drag = False
+        self._settings_btn_rects = {}
+        self._eps_events = []
+
         # Help / instructions popup (opened by F1 or the "? HELP" header button).
         self.show_help = False
         self._help_btn_rect = None
@@ -133,6 +151,24 @@ class Dashboard:
         self.show_mask = False
         self.mask_frame = None
         self._mask_btn_rect = None
+
+        # Ball-colour (HSV) calibration modal — opened by `1` or the "HSV COLOR"
+        # header button. This dashboard owns only the widgets: it holds the six
+        # slider values, draws a live feed + colour-mask preview, and records
+        # high-level events (open/profile/save/close). main.py seeds the sliders,
+        # feeds `hsv_preview_frame` each frame, and acts on take_hsv_events()
+        # (saving to ball_config.json and reloading the processors) — no logic here.
+        self.show_hsv = False
+        self.hsv_profile = "side"               # which camera is being calibrated
+        self.hsv_lower = [0, 30, 50]
+        self.hsv_upper = [30, 255, 255]
+        self.hsv_preview_frame = None           # clean BGR frame for the selected cam
+        self.hsv_saved_until = 0.0              # set by main.py after a real write
+        self._hsv_events = []
+        self._hsv_slider_drag = None            # (track_rect, kind, idx, vmax) while dragging
+        self._hsv_slider_rects = []
+        self._hsv_btn_rects = {}
+        self._hsv_btn_rect = None               # header "HSV COLOR" pill
 
         # transient overlays (timestamps in time.time() seconds)
         self.countdown_text = ""
@@ -241,6 +277,10 @@ class Dashboard:
         # Modal overlays, drawn on top of everything else.
         if self.show_mask:
             self._draw_mask_overlay(W, H)
+        if self.show_hsv:
+            self._draw_hsv_overlay(W, H)
+        if self.show_settings:
+            self._draw_settings_overlay(W, H)
         if self.show_help:
             self._draw_help_overlay(W, H)
 
@@ -277,20 +317,29 @@ class Dashboard:
         self._help_btn_rect = pygame.Rect(W - int(bh * 3.4) - 14, by, int(bh * 3.4), bh)
         self._mask_btn_rect = pygame.Rect(
             self._help_btn_rect.left - gap - int(bh * 4.4), by, int(bh * 4.4), bh)
+        self._hsv_btn_rect = pygame.Rect(
+            self._mask_btn_rect.left - gap - int(bh * 5.0), by, int(bh * 5.0), bh)
+        self._settings_btn_rect = pygame.Rect(
+            self._hsv_btn_rect.left - gap - int(bh * 5.0), by, int(bh * 5.0), bh)
+        self._pill_button(self._settings_btn_rect, "EPSILON", active=self.show_settings)
+        self._pill_button(self._hsv_btn_rect, "HSV COLOR", active=self.show_hsv)
         self._pill_button(self._mask_btn_rect, "B/W MASK", active=self.show_mask)
         self._pill_button(self._help_btn_rect, "?  HELP", active=self.show_help)
 
         hints = ("T Start   N Next   R Reset   |   1 HSV  B Bg  S Radius  "
                  "F Floor   |   G Grid  V Mask  D Color   F1 Help   ESC Exit")
         self._text(hints, self.f_hint, C_DIM,
-                   (self._mask_btn_rect.left - 16, h // 2), anchor="midright")
+                   (self._settings_btn_rect.left - 16, h // 2), anchor="midright")
 
     def _draw_status_bar(self, W, H, h):
         y = H - h
         pygame.draw.rect(self.screen, C_PANEL, (0, y, W, h))
         pygame.draw.line(self.screen, C_BORDER, (0, y), (W, y), 1)
-        self._text(f"Floor agreement epsilon: {self.floor_epsilon_cm:.1f} cm",
-                   self.f_small, C_DIM, (14, y + h // 2), anchor="midleft")
+        lbl = self._text(f"Floor agreement epsilon: {self.floor_epsilon_cm:.1f} cm",
+                         self.f_small, C_DIM, (14, y + h // 2), anchor="midleft")
+        self._text("— click EPSILON to adjust", self.f_small, C_BORDER,
+                   (lbl.right + 12, y + h // 2), anchor="midleft")
+
         mode = "COLOR-ONLY DETECTION" if self.color_only else "Hough + motion fusion"
         self._text(mode, self.f_small, C_DIM, (W - 14, y + h // 2),
                    anchor="midright")
@@ -499,6 +548,370 @@ class Dashboard:
                        (ax + aw // 2, ay + ah // 2), anchor="center")
 
     # ------------------------------------------------------------------ #
+    #  Ball-colour (HSV) calibration modal                               #
+    # ------------------------------------------------------------------ #
+    def open_hsv(self, profile, lower, upper):
+        """Open the HSV modal seeded with a profile's saved bounds (called by main.py)."""
+        self.set_hsv_values(profile, lower, upper)
+        self.show_hsv = True
+        self.show_help = False
+        self.show_mask = False
+
+    def set_hsv_values(self, profile, lower, upper):
+        """Replace the live slider values, e.g. after switching the active camera."""
+        self.hsv_profile = profile
+        self.hsv_lower = [int(v) for v in lower]
+        self.hsv_upper = [int(v) for v in upper]
+
+    def take_hsv_events(self):
+        """Drain the queued HSV actions for main.py: ('open',) ('profile', name)
+        ('save',) ('close',). main.py owns the file I/O and processor reload."""
+        events, self._hsv_events = self._hsv_events, []
+        return events
+
+    def confirm_hsv_saved(self):
+        """Called by main.py after the bounds are actually written to disk, so the
+        modal can flash a truthful 'SAVED' badge (the toast is hidden behind it)."""
+        self.hsv_saved_until = time.time() + 2.2
+
+    def _draw_hsv_overlay(self, W, H):
+        """Modal: live feed + colour mask preview and six draggable HSV sliders."""
+        ov = pygame.Surface((W, H), pygame.SRCALPHA)
+        ov.fill((0, 0, 0, 205))
+        self.screen.blit(ov, (0, 0))
+
+        pw = int(min(W * 0.82, 1320))
+        ph = int(min(H * 0.90, 920))
+        px = (W - pw) // 2
+        py = (H - ph) // 2
+        self._panel((px, py, pw, ph), fill=C_PANEL, border=C_CYAN, radius=14)
+
+        pad = int(pw * 0.03)
+        x = px + pad
+        y = py + pad
+        inner_w = pw - pad * 2
+
+        cam_name = "SIDE A (Main)" if self.hsv_profile == "side" else "SIDE B (Secondary)"
+        title_h = self.f_state.get_height()
+        self._text(f"BALL COLOR CALIBRATION  -  CAMERA {cam_name}",
+                   self.f_state, C_CYAN, (x, y))
+        self._text("ESC / CLOSE to exit", self.f_small, C_DIM,
+                   (px + pw - pad, y + title_h // 2), anchor="midright")
+        y += int(title_h * 1.45)
+        self._text("Drag the sliders until the ball is WHITE and the background is "
+                   "BLACK, then press SAVE.", self.f_body, C_DIM, (x, y))
+        y += int(self.f_body.get_height() * 1.7)
+
+        # ---- previews: live feed (left) + resulting colour mask (right) ----
+        img_h = int(ph * 0.34)
+        gap = pad
+        img_w = (inner_w - gap) // 2
+        self._draw_hsv_preview((x, y, img_w, img_h), "LIVE FEED", show_mask=False)
+        self._draw_hsv_preview((x + img_w + gap, y, img_w, img_h),
+                               "COLOR MASK", show_mask=True)
+        y += img_h + pad
+
+        # ---- six sliders, two columns (lower / upper) ----
+        self._hsv_slider_rects = []
+        specs = [
+            ("Lower Hue", "lower", 0, 179), ("Upper Hue", "upper", 0, 179),
+            ("Lower Sat", "lower", 1, 255), ("Upper Sat", "upper", 1, 255),
+            ("Lower Val", "lower", 2, 255), ("Upper Val", "upper", 2, 255),
+        ]
+        col_gap = pad
+        col_w = (inner_w - col_gap) // 2
+        row_h = int(self.f_body.get_height() * 2.2)
+        for i, (label, kind, idx, vmax) in enumerate(specs):
+            col = i % 2
+            row = i // 2
+            sx = x + col * (col_w + col_gap)
+            sy = y + row * row_h
+            self._draw_hsv_slider(sx, sy, col_w, label, kind, idx, vmax)
+        y += row_h * 3 + pad // 2
+
+        # ---- action buttons: profile toggles (left), save / close (right) ----
+        self._hsv_btn_rects = {}
+        bh = int(self.f_body.get_height() * 2.0)
+        bw = int(inner_w * 0.22)
+        bgap = pad // 2
+        self._draw_hsv_button((x, y, bw, bh), "side", "CAMERA SIDE A",
+                              active=self.hsv_profile == "side")
+        self._draw_hsv_button((x + bw + bgap, y, bw, bh), "top", "CAMERA SIDE B",
+                              active=self.hsv_profile == "top")
+        self._draw_hsv_button((px + pw - pad - bw, y, bw, bh), "close", "CLOSE")
+        save_rect = (px + pw - pad - bw * 2 - bgap, y, bw, bh)
+        self._draw_hsv_button(save_rect, "save", "SAVE", kind="primary")
+
+        # Truthful save confirmation: only shown after main.py actually wrote the
+        # file (confirm_hsv_saved). Centred above the SAVE button so it's visible
+        # on top of the modal, unlike the info-panel toast which the modal hides.
+        if time.time() < self.hsv_saved_until:
+            cam = "SIDE A" if self.hsv_profile == "side" else "SIDE B"
+            self._text(f"✓ SAVED  ({cam})", self.f_label, C_GREEN,
+                       (save_rect[0] + bw // 2, y - int(bh * 0.55)), anchor="center")
+
+    def _draw_hsv_preview(self, rect, label, show_mask):
+        rx, ry, rw, rh = rect
+        label_h = int(self.f_small.get_height() * 1.7)
+        pygame.draw.rect(self.screen, C_PANEL2, (rx, ry, rw, label_h),
+                         border_top_left_radius=8, border_top_right_radius=8)
+        self._text(label, self.f_small, C_CYAN, (rx + 8, ry + label_h // 2),
+                   anchor="midleft")
+
+        area = (rx, ry + label_h, rw, rh - label_h)
+        frame = self.hsv_preview_frame
+        if frame is not None:
+            if show_mask:
+                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                m = cv2.inRange(hsv, np.array(self.hsv_lower, dtype=np.uint8),
+                                np.array(self.hsv_upper, dtype=np.uint8))
+                img = cv2.cvtColor(m, cv2.COLOR_GRAY2BGR)
+            else:
+                img = frame
+            fh, fw = img.shape[:2]
+            ix, iy, iw, ih = _fit(area, fw / fh)
+            self.screen.blit(_bgr_surf(img, (iw, ih)), (ix, iy))
+            pygame.draw.rect(self.screen, C_BORDER, (ix, iy, iw, ih), 1)
+        else:
+            ax, ay, aw, ah = area
+            pygame.draw.rect(self.screen, (10, 12, 16), area)
+            self._text("WAITING FOR CAMERA...", self.f_small, C_YELLOW,
+                       (ax + aw // 2, ay + ah // 2), anchor="center")
+
+    def _draw_hsv_slider(self, sx, sy, w, label, kind, idx, vmax):
+        val = (self.hsv_lower if kind == "lower" else self.hsv_upper)[idx]
+        self._text(label, self.f_small, C_TEXT, (sx, sy))
+        self._text(str(int(val)), self.f_small, C_CYAN, (sx + w, sy),
+                   anchor="topright")
+
+        track_y = sy + int(self.f_small.get_height() * 1.6)
+        track_h = 6
+        track = pygame.Rect(sx, track_y, w, track_h)
+        pygame.draw.rect(self.screen, C_BORDER, track, border_radius=3)
+        frac = (val / vmax) if vmax else 0.0
+        pygame.draw.rect(self.screen, C_CYAN, (sx, track_y, int(w * frac), track_h),
+                         border_radius=3)
+        knob_x = sx + int(w * frac)
+        knob_c = (track_y + track_h // 2)
+        pygame.draw.circle(self.screen, C_WHITE, (knob_x, knob_c), 9)
+        pygame.draw.circle(self.screen, C_CYAN, (knob_x, knob_c), 9, 2)
+        self._hsv_slider_rects.append((track, kind, idx, vmax))
+
+    def _draw_hsv_button(self, rect, name, label, active=False, kind="toggle"):
+        r = pygame.Rect(rect)
+        hover = r.collidepoint(pygame.mouse.get_pos())
+        if kind == "primary":
+            fill = (90, 225, 150) if hover else C_GREEN
+            txt, border = C_BG, C_GREEN
+        elif active:
+            fill, txt, border = (30, 70, 92), C_CYAN, C_CYAN
+        else:
+            fill = C_BORDER if hover else C_PANEL2
+            txt, border = C_TEXT, C_CYAN
+        pygame.draw.rect(self.screen, fill, r, border_radius=8)
+        pygame.draw.rect(self.screen, border, r, 1, border_radius=8)
+        self._text(label, self.f_small, txt, r.center, anchor="center")
+        self._hsv_btn_rects[name] = r
+
+    def _poll_hsv(self):
+        """Owns all input while the HSV modal is open; returns no game keys so the
+        rest of the app stays inert. Records semantic events for main.py to act on."""
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self._hsv_events.append(("close",))
+                self.show_hsv = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    self._hsv_events.append(("close",))
+                    self.show_hsv = False
+                elif event.key == pygame.K_RETURN:
+                    self._hsv_events.append(("save",))
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                self._hsv_mouse_down(event.pos)
+            elif event.type == pygame.MOUSEMOTION:
+                if self._hsv_slider_drag is not None and event.buttons[0]:
+                    self._hsv_drag_to(event.pos)
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self._hsv_slider_drag = None
+        return []
+
+    def _hsv_mouse_down(self, pos):
+        for name, rect in self._hsv_btn_rects.items():
+            if rect.collidepoint(pos):
+                if name in ("side", "top"):
+                    self._hsv_events.append(("profile", name))
+                elif name == "save":
+                    self._hsv_events.append(("save",))
+                elif name == "close":
+                    self._hsv_events.append(("close",))
+                    self.show_hsv = False
+                return
+        for track, kind, idx, vmax in self._hsv_slider_rects:
+            if track.inflate(0, 18).collidepoint(pos):     # generous vertical hit area
+                self._hsv_slider_drag = (track, kind, idx, vmax)
+                self._hsv_drag_to(pos)
+                return
+
+    def _hsv_drag_to(self, pos):
+        track, kind, idx, vmax = self._hsv_slider_drag
+        frac = (pos[0] - track.x) / max(1, track.width)
+        frac = min(1.0, max(0.0, frac))
+        arr = self.hsv_lower if kind == "lower" else self.hsv_upper
+        arr[idx] = int(round(frac * vmax))
+
+    # ------------------------------------------------------------------ #
+    #  EPSILON settings modal (drop-sensitivity tuner)                   #
+    # ------------------------------------------------------------------ #
+    def open_settings(self):
+        """Open the EPSILON pane, seeded with the current live value."""
+        self.settings_eps = self.floor_epsilon_cm
+        self.show_settings = True
+        self.show_help = False
+        self.show_mask = False
+        self.show_hsv = False
+
+    def take_epsilon_events(self):
+        """Drain queued ABSOLUTE target epsilon values (cm) from the EPSILON pane.
+        main.py applies each via game_logic.adjust_floor_epsilon() (delta computed
+        sequentially at apply-time, so rapid clicks never desync)."""
+        events, self._eps_events = self._eps_events, []
+        return events
+
+    def _set_settings_eps(self, value, queue=True):
+        """Clamp + store the working epsilon, and (optionally) queue it for main.py."""
+        self.settings_eps = min(EPS_MAX, max(EPS_MIN, round(value, 2)))
+        if queue:
+            self._eps_events.append(self.settings_eps)
+
+    def _draw_settings_overlay(self, W, H):
+        """Modal: a big live value, a draggable slider and - / + buttons that tune
+        the floor-agreement epsilon (how close the two cameras must agree the ball
+        is on the floor before a drop is confirmed)."""
+        ov = pygame.Surface((W, H), pygame.SRCALPHA)
+        ov.fill((0, 0, 0, 205))
+        self.screen.blit(ov, (0, 0))
+
+        pw = int(min(W * 0.58, 880))
+        ph = int(min(H * 0.66, 640))
+        px = (W - pw) // 2
+        py = (H - ph) // 2
+        self._panel((px, py, pw, ph), fill=C_PANEL, border=C_CYAN, radius=14)
+
+        pad = int(pw * 0.05)
+        x = px + pad
+        y = py + pad
+        inner_w = pw - pad * 2
+        title_h = self.f_state.get_height()
+
+        self._text("DROP SENSITIVITY  -  FLOOR EPSILON", self.f_state, C_CYAN, (x, y))
+        self._text("ESC / CLOSE to exit", self.f_small, C_DIM,
+                   (px + pw - pad, y + title_h // 2), anchor="midright")
+        y += int(title_h * 1.6)
+
+        for line in (
+            "A drop is confirmed only when BOTH cameras agree the ball is on the",
+            "floor within this distance. Wider = drops caught sooner; too wide =",
+            "false drops mid-juggle. Tune live until drops register cleanly.",
+        ):
+            self._text(line, self.f_body, C_DIM, (x, y))
+            y += int(self.f_body.get_height() * 1.32)
+        y += pad // 2
+
+        # ---- big live value ----
+        self._text(f"{self.settings_eps:.1f} cm", self.f_score, C_GREEN,
+                   (px + pw // 2, y + self.f_score.get_height() // 2), anchor="center")
+        y += int(self.f_score.get_height() * 1.15)
+
+        # ---- slider ----
+        track_h = 8
+        track = pygame.Rect(x, y, inner_w, track_h)
+        self._settings_slider_rect = track
+        pygame.draw.rect(self.screen, C_BORDER, track, border_radius=4)
+        frac = (self.settings_eps - EPS_MIN) / (EPS_MAX - EPS_MIN)
+        frac = min(1.0, max(0.0, frac))
+        pygame.draw.rect(self.screen, C_CYAN, (x, y, int(inner_w * frac), track_h),
+                         border_radius=4)
+        knob_x = x + int(inner_w * frac)
+        knob_y = y + track_h // 2
+        pygame.draw.circle(self.screen, C_WHITE, (knob_x, knob_y), 12)
+        pygame.draw.circle(self.screen, C_CYAN, (knob_x, knob_y), 12, 2)
+        self._text(f"{EPS_MIN:.1f}", self.f_small, C_DIM, (x, y + 18))
+        self._text(f"{EPS_MAX:.0f} cm", self.f_small, C_DIM,
+                   (x + inner_w, y + 18), anchor="topright")
+        y += track_h + int(self.f_small.get_height() * 2.6)
+
+        # ---- buttons: -0.5 , +0.5 , close ----
+        self._settings_btn_rects = {}
+        bh = int(self.f_body.get_height() * 2.2)
+        bw = int(inner_w * 0.2)
+        bgap = pad // 2
+        self._draw_settings_button((x, y, bw, bh), "minus", f"-  {EPS_STEP:.1f}")
+        self._draw_settings_button((x + bw + bgap, y, bw, bh), "plus",
+                                   f"+  {EPS_STEP:.1f}", kind="primary")
+        self._draw_settings_button((px + pw - pad - bw, y, bw, bh), "close", "CLOSE")
+
+    def _draw_settings_button(self, rect, name, label, kind="toggle"):
+        r = pygame.Rect(rect)
+        hover = r.collidepoint(pygame.mouse.get_pos())
+        if kind == "primary":
+            fill = (90, 225, 150) if hover else C_GREEN
+            txt, border = C_BG, C_GREEN
+        else:
+            fill = C_BORDER if hover else C_PANEL2
+            txt, border = C_TEXT, C_CYAN
+        pygame.draw.rect(self.screen, fill, r, border_radius=8)
+        pygame.draw.rect(self.screen, border, r, 1, border_radius=8)
+        self._text(label, self.f_body, txt, r.center, anchor="center")
+        self._settings_btn_rects[name] = r
+
+    def _poll_settings(self):
+        """Owns all input while the EPSILON modal is open; returns no game keys."""
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.show_settings = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    self.show_settings = False
+                elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                    self._set_settings_eps(self.settings_eps - EPS_STEP)
+                elif event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
+                    self._set_settings_eps(self.settings_eps + EPS_STEP)
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                self._settings_mouse_down(event.pos)
+            elif event.type == pygame.MOUSEMOTION:
+                if self._settings_slider_drag and event.buttons[0]:
+                    self._settings_drag_to(event.pos)
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                if self._settings_slider_drag:
+                    self._settings_slider_drag = False
+                    self._eps_events.append(self.settings_eps)   # commit on release
+        return []
+
+    def _settings_mouse_down(self, pos):
+        for name, rect in self._settings_btn_rects.items():
+            if rect.collidepoint(pos):
+                if name == "minus":
+                    self._set_settings_eps(self.settings_eps - EPS_STEP)
+                elif name == "plus":
+                    self._set_settings_eps(self.settings_eps + EPS_STEP)
+                elif name == "close":
+                    self.show_settings = False
+                return
+        if self._settings_slider_rect and \
+                self._settings_slider_rect.inflate(0, 22).collidepoint(pos):
+            self._settings_slider_drag = True
+            self._settings_drag_to(pos)            # jump-to-click; commit on release
+
+    def _settings_drag_to(self, pos):
+        track = self._settings_slider_rect
+        frac = (pos[0] - track.x) / max(1, track.width)
+        frac = min(1.0, max(0.0, frac))
+        # Snap to the step grid so the displayed value matches what gets saved.
+        raw = EPS_MIN + frac * (EPS_MAX - EPS_MIN)
+        snapped = round(raw / EPS_STEP) * EPS_STEP
+        self._set_settings_eps(snapped, queue=False)   # preview only while dragging
+
+    # ------------------------------------------------------------------ #
     #  Help / instructions popup                                         #
     # ------------------------------------------------------------------ #
     def _draw_help_overlay(self, W, H):
@@ -526,8 +939,8 @@ class Dashboard:
         H1, B, S = self.f_head, self.f_body, self.f_small
         lines = [
             ("CALIBRATION  -  do these in order:", H1, C_YELLOW),
-            ("1.  HSV COLOR    Press 1  ->  6 sliders. Make the ball WHITE and the", B, C_TEXT),
-            ("                 background BLACK, then press ESC to save.", B, C_DIM),
+            ("1.  HSV COLOR    Press 1 (or click HSV COLOR). Drag the 6 sliders so the", B, C_TEXT),
+            ("                 ball is WHITE and the background BLACK, then click SAVE.", B, C_DIM),
             ("2.  BACKGROUND   Step out of the frame and press B.", B, C_TEXT),
             ("3.  BALL RADIUS  Put the ball on the floor and press S.", B, C_TEXT),
             ("4.  FLOOR GRID   Press F. Put the ball on each of the 12 floor marks", B, C_TEXT),
@@ -537,6 +950,8 @@ class Dashboard:
             ("FINE-TUNE THE FLOOR LINE", H1, C_CYAN),
             ("A / Z  left anchor      UP / DOWN  right anchor      [  ]  left edge", B, C_TEXT),
             ("'  \\  right edge        - / +  floor-agreement epsilon", B, C_TEXT),
+            ("                 (or click EPSILON in the top bar for a slider + buttons)", S, C_DIM),
+            ("                 A wider epsilon catches drops sooner; too wide = false drops.", S, C_DIM),
             ("", B, C_DIM),
             ("GAMEPLAY", H1, C_CYAN),
             ("T  start (3-second countdown)     N  next player     R  reset score", B, C_TEXT),
@@ -562,6 +977,13 @@ class Dashboard:
         one is open it is modal — any key or click dismisses it and that input is
         swallowed so it can't trigger an action.
         """
+        # The HSV calibration modal is fully interactive (draggable sliders,
+        # buttons), so it takes over input entirely while open.
+        if self.show_hsv:
+            return self._poll_hsv()
+        if self.show_settings:
+            return self._poll_settings()
+
         keys = []
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -580,7 +1002,12 @@ class Dashboard:
                 keys.append(event.key)
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 p = event.pos
-                if self._help_btn_rect and self._help_btn_rect.collidepoint(p):
+                if self._hsv_btn_rect and self._hsv_btn_rect.collidepoint(p):
+                    # main.py seeds the sliders from the saved profile, then opens.
+                    self._hsv_events.append(("open",))
+                elif self._settings_btn_rect and self._settings_btn_rect.collidepoint(p):
+                    self.open_settings()
+                elif self._help_btn_rect and self._help_btn_rect.collidepoint(p):
                     self.show_help = not self.show_help
                     self.show_mask = False
                 elif self._mask_btn_rect and self._mask_btn_rect.collidepoint(p):

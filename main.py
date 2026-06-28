@@ -4,14 +4,13 @@ import time
 import os
 import sys
 import json
-import subprocess
 import threading
 import pygame
 from camera_manager import DualCameraManager
 from ball_processor import BallProcessor
 from juggling_logic import JugglingCounter
 from config import CONFIG
-from config_utils import load_hsv_config, load_floor_points, save_floor_points
+from config_utils import load_hsv_config, save_hsv_config, load_floor_points, save_floor_points
 from floor_finding import FloorFinder
 from dashboard import Dashboard
 
@@ -443,7 +442,7 @@ def print_welcome_instructions():
     print()
     print("  CALIBRATION (run these before playing):")
     print("  -----------------------------------------")
-    print("  0. HSV COLOR     Press '1' (opens color helper).")
+    print("  0. HSV COLOR     Press '1' (in-window color sliders).")
     print("  1. BACKGROUND    Step out of frame, press 'B'.")
     print("  2. RADIUS        Place ball on floor, press 'S'.")
     print("  3. FLOOR (12pt)  Press 'F', place ball at 12 spots,")
@@ -467,7 +466,7 @@ def print_welcome_instructions():
     print()
     print("  OTHER:")
     print("  -----------------------------------------")
-    print("  1          Launch HSV color calibration helper")
+    print("  1          Open in-window HSV color calibration")
     print("  B          Re-capture background (reset MOG2)")
     print("  S          Recalibrate ball radius")
     print("  F          Floor calibration (12-point)")
@@ -689,6 +688,12 @@ def main():
             dash.go_until = go_until
         prev_countdown = game_logic.countdown_active
 
+        # --- feed the HSV calibration modal a CLEAN copy of the selected camera
+        #     (before tracking overlays are drawn) so its preview is unobstructed ---
+        if dash.show_hsv:
+            dash.hsv_preview_frame = (frame_side if dash.hsv_profile == "side"
+                                      else frame_top).copy()
+
         # --- tracking overlays on both feeds (drawn on the numpy frames) ---
         draw_tracking_info(frame_side, data_side, f"SIDE-A: {status_side}", (255, 255, 0))
         draw_tracking_info(frame_top, data_top, f"SIDE-B: {status_top}", (0, 255, 0))
@@ -749,33 +754,53 @@ def main():
         # ------------------------------------------------------------------ #
         #  Input — all keys now come from pygame                             #
         # ------------------------------------------------------------------ #
-        for key in dash.poll_events():
+        keys = dash.poll_events()
+
+        # HSV ball-colour calibration: the dashboard owns the in-window widgets and
+        # emits high-level events; main.py does the file I/O and processor reload.
+        for ev in dash.take_hsv_events():
+            if ev[0] in ("open", "profile"):
+                profile = ev[1] if ev[0] == "profile" else dash.hsv_profile
+                lower, upper = load_hsv_config(profile)
+                if ev[0] == "open":
+                    dash.open_hsv(profile, lower, upper)
+                else:
+                    dash.set_hsv_values(profile, lower, upper)
+            elif ev[0] == "save":
+                profile = dash.hsv_profile
+                lower = np.array(dash.hsv_lower, dtype=np.uint8)
+                upper = np.array(dash.hsv_upper, dtype=np.uint8)
+                save_hsv_config(lower, upper, profile)
+                # Apply immediately to the live processor for that camera.
+                proc = processor_side if profile == "side" else processor_top
+                proc.lower_hsv, proc.upper_hsv = lower, upper
+                dash.cal["hsv"] = "session" if _check_hsv_calibrated() else dash.cal["hsv"]
+                dash.confirm_hsv_saved()         # in-modal "SAVED" badge (toast is hidden behind it)
+                cam = "SIDE A" if profile == "side" else "SIDE B"
+                print(f"[INPUT] HSV color saved for {cam}: lower={dash.hsv_lower} upper={dash.hsv_upper}")
+                dash.set_toast(f"Ball color saved for {cam}", time.time() + ui["toast_sec"])
+            elif ev[0] == "close":
+                dash.set_toast("Color calibration closed", time.time() + ui["toast_sec"])
+
+        # EPSILON settings pane: each event is an absolute target (cm). Compute the
+        # delta against the live value at apply-time so sequential events compose
+        # correctly, then reuse the existing adjust_floor_epsilon() (no logic added).
+        for target in dash.take_epsilon_events():
+            delta = round(target - game_logic.floor_epsilon_cm, 2)
+            if abs(delta) >= 0.01:
+                game_logic.adjust_floor_epsilon(delta)
+                dash.set_toast(f"Floor epsilon: {game_logic.floor_epsilon_cm:.1f} cm",
+                               time.time() + ui["toast_sec"])
+
+        for key in keys:
             if key == pygame.K_ESCAPE:
                 running = False
                 break
 
             elif key == pygame.K_1:
-                print("[INPUT] Launching HSV Calibration Helper...")
-                dash.set_toast("Releasing cameras for HSV helper...",
-                               time.time() + ui["toast_sec"])
-                dash.draw(frame_side, frame_top)
-                # Free the camera handles so the helper subprocess can open them,
-                # then reacquire afterwards (the HSV GUI needs exclusive access).
-                dual_cam.stop()
-                try:
-                    subprocess.call(["python", "Calibration Helper script.py"], cwd=HERE)
-                except Exception as e:
-                    print(f"[ERROR] Could not launch HSV helper: {e}")
-                dual_cam = DualCameraManager().start()
-                # Warm up the reopened cameras before the main loop's None-check.
-                for _ in range(30):
-                    wt, ws = dual_cam.read()
-                    if wt is not None and ws is not None:
-                        break
-                    time.sleep(0.03)
-                dash.cal["hsv"] = "session" if _check_hsv_calibrated() else False
-                dash.set_toast("HSV calibration updated", time.time() + ui["toast_sec"])
-                pygame.event.clear()
+                print("[INPUT] Opening in-window HSV color calibration...")
+                lower, upper = load_hsv_config(dash.hsv_profile)
+                dash.open_hsv(dash.hsv_profile, lower, upper)
 
             elif key == pygame.K_b:
                 print("[INPUT] Resetting MOG2 background models...")
