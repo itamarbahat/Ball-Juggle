@@ -2,8 +2,20 @@ import json
 import os
 import numpy as np
 
-CONFIG_FILE = "ball_config.json"
-RUNTIME_CONFIG_FILE = "runtime_config.json"
+# formatting the config file paths to be relative to the script's directory
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) 
+# defining the configs directory path
+CONFIG_DIR = os.path.join(BASE_DIR, "configs")
+
+# ensuring the configs directory exists
+os.makedirs(CONFIG_DIR, exist_ok=True)
+
+# this defines the paths for the configuration files,
+# ensuring they are stored in the configs directory
+CONFIG_FILE = os.path.join(CONFIG_DIR, "ball_config.json")
+RUNTIME_CONFIG_FILE = os.path.join(CONFIG_DIR, "runtime_config.json")
+FLOOR_CONFIG_FILE = os.path.join(CONFIG_DIR, "floor_calibration.json")
+
 
 def save_hsv_config(lower_hsv, upper_hsv, profile_name="default"):
     """Saves HSV bounds for a camera profile, preserving other profiles in the file."""
@@ -20,11 +32,12 @@ def save_hsv_config(lower_hsv, upper_hsv, profile_name="default"):
         "lower_hsv": lower_hsv.tolist(),
         "upper_hsv": upper_hsv.tolist()
     }
-
+ 
     with open(CONFIG_FILE, 'w') as f:
         json.dump(data, f, indent=4)
     
-    print(f"[INFO] HSV config for '{profile_name}' saved.")
+    print(f"[INFO] HSV config for '{profile_name}' saved to {CONFIG_FILE}.")
+
 
 def load_hsv_config(profile_name="default"):
     """Loads HSV bounds for a camera profile; falls back to broad defaults."""
@@ -32,7 +45,7 @@ def load_hsv_config(profile_name="default"):
     default_upper = np.array([30, 255, 255])
 
     if not os.path.exists(CONFIG_FILE):
-        print(f"[WARNING] Config file not found. Using defaults.")
+        print(f"[WARNING] Config file not found at {CONFIG_FILE}. Using defaults.")
         return default_lower, default_upper
     
     with open(CONFIG_FILE, 'r') as f:
@@ -43,8 +56,8 @@ def load_hsv_config(profile_name="default"):
             return default_lower, default_upper
     
     if profile_name not in data:
-        print(f"[WARNING] Profile '{profile_name}' not found. Using defaults.")
-        return default_lower, default_upper
+        print(f"[WARNING] Profile '{profile_name}' not found at {CONFIG_FILE}. Using defaults.")
+        return default_lower, default_upper 
     
     profile_data = data[profile_name]
     lower = np.array(profile_data["lower_hsv"])
@@ -92,8 +105,6 @@ def load_floor_epsilon(default_value=5.0):
         return float(default_value)
 
 
-FLOOR_CONFIG_FILE = "floor_calibration.json"
-
 def save_floor_points(pts_world, pts_cam_top, pts_cam_side):
     data = {
         "pts_world": pts_world.tolist(),
@@ -102,12 +113,12 @@ def save_floor_points(pts_world, pts_cam_top, pts_cam_side):
     }
     with open(FLOOR_CONFIG_FILE, 'w') as f:
         json.dump(data, f, indent=4)
-    print(f"[INFO] Floor calibration saved.")
+    print(f"[INFO] Floor calibration saved to {FLOOR_CONFIG_FILE}.")
 
 
 def load_floor_points():
     if not os.path.exists(FLOOR_CONFIG_FILE):
-        print(f"[WARNING] Floor calibration file not found.")
+        print(f"[WARNING] Floor calibration file not found at {FLOOR_CONFIG_FILE}.")
         return None, None, None
 
     try:
@@ -121,3 +132,4 @@ def load_floor_points():
     except (json.JSONDecodeError, KeyError) as e:
         print(f"[ERROR] Floor calibration load failed: {e}")
         return None, None, None
+     

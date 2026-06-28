@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from config_utils import load_floor_points
+from Utils.config_utils import load_floor_points
 
 
 class FloorFinder:

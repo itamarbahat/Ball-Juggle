@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 from config import CONFIG
-from config_utils import load_hsv_config
+from Utils.config_utils import load_hsv_config
 
 class BallProcessor:
     """

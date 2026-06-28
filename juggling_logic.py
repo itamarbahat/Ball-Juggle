@@ -5,7 +5,7 @@ import os
 import threading
 from collections import deque
 from config import CONFIG
-from config_utils import load_floor_epsilon, save_floor_epsilon
+from Utils.config_utils import load_floor_epsilon, save_floor_epsilon
 
 try:
     import pygame

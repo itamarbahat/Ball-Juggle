@@ -1,7 +1,16 @@
 import cv2
 import numpy as np
 import time
-from config_utils import load_hsv_config, save_hsv_config 
+import sys
+import os
+
+# we add the root directory to the path so we can import from utils
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
+
+# עכשיו אנחנו מייבאים מתוך utils בהנחה ששני הקבצים שם
+from Utils.config_utils import load_hsv_config, save_hsv_config 
 
 def nothing(x):
     pass

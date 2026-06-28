@@ -9,7 +9,7 @@ import os
 import glob
 import time
 from config import CONFIG
-from config_utils import load_hsv_config
+from Utils.config_utils import load_hsv_config
 
 EVAL_DIR = "evaluation"
 INPUT_DIR = os.path.join(EVAL_DIR, "eval_input")

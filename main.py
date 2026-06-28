@@ -5,7 +5,7 @@ from camera_manager import DualCameraManager
 from ball_processor import BallProcessor
 from juggling_logic import JugglingCounter
 from config import CONFIG
-from config_utils import load_hsv_config, load_floor_points, save_floor_points
+from Utils.config_utils import load_hsv_config, load_floor_points, save_floor_points
 from floor_finding import FloorFinder
 
 def draw_tracking_info(frame, ball_data, status_msg, color=(0, 255, 0)):
