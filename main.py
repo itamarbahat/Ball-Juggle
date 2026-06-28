@@ -5,7 +5,7 @@ from camera_manager import DualCameraManager
 from ball_processor import BallProcessor
 from juggling_logic import JugglingCounter
 from config import CONFIG
-from Utils.config_utils import load_hsv_config, load_floor_points, save_floor_points
+from Utils.config_utils import load_hsv_config, load_floor_points, save_floor_points, generate_world_points, generate_point_names
 from floor_finding import FloorFinder
 
 def draw_tracking_info(frame, ball_data, status_msg, color=(0, 255, 0)):
@@ -93,18 +93,18 @@ def perform_flash_calibration(dual_cam, game_logic):
     print("[CAL] Starting radius calibration (15-frame HSV sample)...")
     
     lower_side, upper_side = load_hsv_config("side")
-    lower_top, upper_top = load_hsv_config("top")
+    lower_main, upper_main = load_hsv_config("main")
     
     collected_radii_side = []
-    collected_radii_top = []
+    collected_radii_main = []
     
     for _ in range(15):
-        frame_top_raw, frame_side_raw = dual_cam.read()
-        if frame_top_raw is None: break
+        frame_main_raw, frame_side_raw = dual_cam.read()
+        if frame_main_raw is None: break
         
         target_w = CONFIG["camera"]["width"]
         target_h = CONFIG["camera"]["height"]
-        frame_top = cv2.resize(frame_top_raw, (target_w, target_h))
+        frame_main = cv2.resize(frame_main_raw, (target_w, target_h))
         frame_side = cv2.resize(frame_side_raw, (target_w, target_h))
         
         hsv_side = cv2.cvtColor(frame_side, cv2.COLOR_BGR2HSV)
@@ -117,115 +117,89 @@ def perform_flash_calibration(dual_cam, game_logic):
                 ((x, y), r) = cv2.minEnclosingCircle(c)
                 collected_radii_side.append((int(x), int(y), int(r)))
 
-        hsv_top = cv2.cvtColor(frame_top, cv2.COLOR_BGR2HSV)
-        mask_top = cv2.inRange(hsv_top, lower_top, upper_top)
-        cnts_top, _ = cv2.findContours(mask_top, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if cnts_top:
-            valid_top = [c for c in cnts_top if 10 < cv2.minEnclosingCircle(c)[1] < 100]
-            if valid_top:
-                c = max(valid_top, key=cv2.contourArea)
+        hsv_main = cv2.cvtColor(frame_main, cv2.COLOR_BGR2HSV)
+        mask_main = cv2.inRange(hsv_main, lower_main, upper_main)
+        cnts_main, _ = cv2.findContours(mask_main, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if cnts_main:
+            valid_main = [c for c in cnts_main if 10 < cv2.minEnclosingCircle(c)[1] < 100]
+            if valid_main:
+                c = max(valid_main, key=cv2.contourArea)
                 ((x, y), r) = cv2.minEnclosingCircle(c)
-                collected_radii_top.append((int(x), int(y), int(r)))
+                collected_radii_main.append((int(x), int(y), int(r)))
             
         time.sleep(0.01)
 
     final_side = None
-    final_top = None
+    final_main = None
     
     if collected_radii_side:
         collected_radii_side.sort(key=lambda x: x[2])
         final_side = collected_radii_side[len(collected_radii_side)//2]
         
-    if collected_radii_top:
-        collected_radii_top.sort(key=lambda x: x[2])
-        final_top = collected_radii_top[len(collected_radii_top)//2]
+    if collected_radii_main:
+        collected_radii_main.sort(key=lambda x: x[2])
+        final_main = collected_radii_main[len(collected_radii_main)//2]
         
     if final_side:
-        game_logic.set_baseline(final_top, final_side)
         print(f"[CAL] Radius calibration OK. Median radius: {final_side[2]}")
     else:
         print("[CAL] Radius calibration FAILED — ball not found in side view.")
 
 
-def perform_flash_head_calibration(dual_cam, game_logic):
-    """Pure HSV capture for the top camera to set the head-height radius baseline."""
+def perform_flash_header_calibration(header_cap, game_logic):
+    """Pure HSV capture for the optional header camera to set the head-height radius baseline."""
+    if header_cap is None:
+        print("[WARNING] No header camera available for header calibration.")
+        return
+
     print("[CAL] Starting header calibration (15-frame HSV sample)...")
-    
-    lower_top, upper_top = load_hsv_config("top")
-    collected_radii_top = []
+    lower_header, upper_header = load_hsv_config("header")
+    collected_radii_header = []
     
     for _ in range(15):
-        frame_top_raw, _ = dual_cam.read()
-        if frame_top_raw is None: break
+        ret, frame_header_raw = header_cap.read()
+        if not ret or frame_header_raw is None:
+            break
         
         target_w = CONFIG["camera"]["width"]
         target_h = CONFIG["camera"]["height"]
-        frame_top = cv2.resize(frame_top_raw, (target_w, target_h))
+        frame_header = cv2.resize(frame_header_raw, (target_w, target_h))
         
-        hsv_top = cv2.cvtColor(frame_top, cv2.COLOR_BGR2HSV)
-        mask_top = cv2.inRange(hsv_top, lower_top, upper_top)
+        hsv_header = cv2.cvtColor(frame_header, cv2.COLOR_BGR2HSV)
+        mask_header = cv2.inRange(hsv_header, lower_header, upper_header)
         
-        cnts_top, _ = cv2.findContours(mask_top, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if cnts_top:
-            valid_top = [c for c in cnts_top if 10 < cv2.minEnclosingCircle(c)[1] < 100]
-            if valid_top:
-                c = max(valid_top, key=cv2.contourArea)
+        cnts_header, _ = cv2.findContours(mask_header, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if cnts_header:
+            valid_header = [c for c in cnts_header if 10 < cv2.minEnclosingCircle(c)[1] < 100]
+            if valid_header:
+                c = max(valid_header, key=cv2.contourArea)
                 ((x, y), r) = cv2.minEnclosingCircle(c)
-                collected_radii_top.append((int(x), int(y), int(r)))
+                collected_radii_header.append((int(x), int(y), int(r)))
             
         time.sleep(0.01)
 
-    if collected_radii_top:
-        collected_radii_top.sort(key=lambda x: x[2])
-        final_top = collected_radii_top[len(collected_radii_top)//2]
-        game_logic.set_head_baseline(final_top)
-        print(f"[CAL] Header calibration OK. Head radius: {final_top[2]}")
+    if collected_radii_header:
+        collected_radii_header.sort(key=lambda x: x[2])
+        final_header = collected_radii_header[len(collected_radii_header)//2]
+        game_logic.calibrate_head_height(final_header[2])
+        print(f"[CAL] Header calibration OK. Head radius: {final_header[2]}")
     else:
-        print("[CAL] Header calibration FAILED — ball not seen by top camera.")
+        print("[CAL] Header calibration FAILED — ball not seen by header camera.")
 
 
-def perform_floor_calibration(dual_cam, processor_top, processor_side, game_logic):
+def perform_floor_calibration(dual_cam, processor_main, processor_side, game_logic):
     """
-    Interactive 12-point floor calibration using pure HSV detection.
+    Interactive floor calibration using pure HSV detection.
+    Dynamically generates calibration grid points based on configuration.
     Captures ball positions from both cameras, computes homography,
     and updates the FloorFinder.
     """
-    NUM_POINTS = 12
-
-    world_points = np.array([
-        # Row 1 — Front (y=0): 4 points across
-        [0, 0],       # Point 1:  Front-Left
-        [33, 0],      # Point 2:  Front-Center-Left
-        [67, 0],      # Point 3:  Front-Center-Right
-        [100, 0],     # Point 4:  Front-Right
-        # Row 2 — Middle (y=50): 4 points across
-        [0, 50],      # Point 5:  Middle-Left
-        [33, 50],     # Point 6:  Middle-Center-Left
-        [67, 50],     # Point 7:  Middle-Center-Right
-        [100, 50],    # Point 8:  Middle-Right
-        # Row 3 — Back (y=100): 4 points across
-        [0, 100],     # Point 9:  Back-Left
-        [33, 100],    # Point 10: Back-Center-Left
-        [67, 100],    # Point 11: Back-Center-Right
-        [100, 100]    # Point 12: Back-Right
-    ], dtype=np.float32)
+    # Dynamically generate world points and their descriptive names
+    world_points = generate_world_points(CONFIG)
+    point_names = generate_point_names(CONFIG)
+    NUM_POINTS = len(world_points)
     
-    point_names = [
-        "FRONT-LEFT",
-        "FRONT-CENTER-LEFT",
-        "FRONT-CENTER-RIGHT",
-        "FRONT-RIGHT",
-        "MIDDLE-LEFT",
-        "MIDDLE-CENTER-LEFT",
-        "MIDDLE-CENTER-RIGHT",
-        "MIDDLE-RIGHT",
-        "BACK-LEFT",
-        "BACK-CENTER-LEFT",
-        "BACK-CENTER-RIGHT",
-        "BACK-RIGHT"
-    ]
-    
-    captured_top = []
+    captured_main = []
     captured_side = []
     
     target_w = CONFIG["camera"]["width"]
@@ -240,40 +214,40 @@ def perform_floor_calibration(dual_cam, processor_top, processor_side, game_logi
     print("  SPACE = capture point   |   ESC = cancel")
     print("=" * 50)
     
-    processor_top.disable_mog_temporarily(99999)
+    processor_main.disable_mog_temporarily(99999)
     processor_side.disable_mog_temporarily(99999)
     
     lower_side, upper_side = load_hsv_config("side")
-    lower_top, upper_top = load_hsv_config("top")
+    lower_main, upper_main = load_hsv_config("main")
     
     for i in range(NUM_POINTS):
         print(f"[FLOOR_CAL] Point {i+1}/{NUM_POINTS}: {point_names[i]}  (world: {world_points[i].tolist()} cm)")
         print(f"            Press SPACE when ball is in position...")
         
         while True:
-            frame_top_raw, frame_side_raw = dual_cam.read()
-            if frame_top_raw is None or frame_side_raw is None:
+            frame_main_raw, frame_side_raw = dual_cam.read()
+            if frame_main_raw is None or frame_side_raw is None:
                 break
                 
-            frame_top = cv2.resize(frame_top_raw, (target_w, target_h))
+            frame_main = cv2.resize(frame_main_raw, (target_w, target_h))
             frame_side = cv2.resize(frame_side_raw, (target_w, target_h))
             
-            ball_top = _detect_ball_hsv(frame_top, lower_top, upper_top)
+            ball_main = _detect_ball_hsv(frame_main, lower_main, upper_main)
             ball_side = _detect_ball_hsv(frame_side, lower_side, upper_side)
 
-            display_top = frame_top.copy()
+            display_main = frame_main.copy()
             display_side = frame_side.copy()
             
-            cv2.putText(display_top, f"FLOOR CAL: Point {i+1}/{NUM_POINTS} - {point_names[i]}", 
+            cv2.putText(display_main, f"FLOOR CAL: Point {i+1}/{NUM_POINTS} - {point_names[i]}", 
                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             cv2.putText(display_side, f"FLOOR CAL: Point {i+1}/{NUM_POINTS} - {point_names[i]}", 
                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             
-            if ball_top:
-                cv2.circle(display_top, (ball_top[0], ball_top[1]), ball_top[2], (0, 255, 0), 2)
-                cv2.circle(display_top, (ball_top[0], ball_top[1]), 5, (0, 0, 255), -1)
-                cv2.putText(display_top, f"({ball_top[0]}, {ball_top[1]})", 
-                           (ball_top[0]+10, ball_top[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+            if ball_main:
+                cv2.circle(display_main, (ball_main[0], ball_main[1]), ball_main[2], (0, 255, 0), 2)
+                cv2.circle(display_main, (ball_main[0], ball_main[1]), 5, (0, 0, 255), -1)
+                cv2.putText(display_main, f"({ball_main[0]}, {ball_main[1]})", 
+                           (ball_main[0]+10, ball_main[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
             
             if ball_side:
                 cv2.circle(display_side, (ball_side[0], ball_side[1]), ball_side[2], (0, 255, 0), 2)
@@ -281,51 +255,51 @@ def perform_floor_calibration(dual_cam, processor_top, processor_side, game_logi
                 cv2.putText(display_side, f"({ball_side[0]}, {ball_side[1]})", 
                            (ball_side[0]+10, ball_side[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
             
-            for j, (pt, ps) in enumerate(zip(captured_top, captured_side)):
-                cv2.circle(display_top, (int(pt[0]), int(pt[1])), 8, (255, 0, 255), -1)
-                cv2.putText(display_top, str(j+1), (int(pt[0])+10, int(pt[1])), 
+            for j, (pt, ps) in enumerate(zip(captured_main, captured_side)):
+                cv2.circle(display_main, (int(pt[0]), int(pt[1])), 8, (255, 0, 255), -1)
+                cv2.putText(display_main, str(j+1), (int(pt[0])+10, int(pt[1])), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
                 cv2.circle(display_side, (int(ps[0]), int(ps[1])), 8, (255, 0, 255), -1)
                 cv2.putText(display_side, str(j+1), (int(ps[0])+10, int(ps[1])), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
             
             cv2.imshow("Main - SIDE View (Master)", display_side)
-            cv2.imshow("Main - TOP View (Slave)", display_top)
+            cv2.imshow("Main - FRONT View (Main)", display_main)
             
             key = cv2.waitKey(33) & 0xFF
             
             if key == 27:  # ESC - cancel
                 print("[FLOOR_CAL] Cancelled by user.")
-                processor_top.disable_mog_temporarily(0)
+                processor_main.disable_mog_temporarily(0)
                 processor_side.disable_mog_temporarily(0)
                 return None
             
             if key == 32:  # SPACE - capture
-                if ball_top and ball_side:
-                    captured_top.append([ball_top[0], ball_top[1]])
+                if ball_main and ball_side:
+                    captured_main.append([ball_main[0], ball_main[1]])
                     captured_side.append([ball_side[0], ball_side[1]])
-                    print(f"[FLOOR_CAL] Point {i+1} captured: TOP=({ball_top[0]},{ball_top[1]})  SIDE=({ball_side[0]},{ball_side[1]})")
+                    print(f"[FLOOR_CAL] Point {i+1} captured: MAIN=({ball_main[0]},{ball_main[1]})  SIDE=({ball_side[0]},{ball_side[1]})")
                     break
                 else:
                     missing = []
-                    if not ball_top: missing.append("TOP")
+                    if not ball_main: missing.append("MAIN")
                     if not ball_side: missing.append("SIDE")
                     print(f"[FLOOR_CAL] Ball not detected in: {', '.join(missing)}. Reposition and retry.")
     
-    processor_top.disable_mog_temporarily(0)
+    processor_main.disable_mog_temporarily(0)
     processor_side.disable_mog_temporarily(0)
     
-    pts_cam_top = np.array(captured_top, dtype=np.float32)
+    pts_cam_main = np.array(captured_main, dtype=np.float32)
     pts_cam_side = np.array(captured_side, dtype=np.float32)
     
-    save_floor_points(world_points, pts_cam_top, pts_cam_side)
-    new_floor_finder = FloorFinder(world_points, pts_cam_top, pts_cam_side)
+    save_floor_points(world_points, pts_cam_main, pts_cam_side)
+    new_floor_finder = FloorFinder(world_points, pts_cam_main, pts_cam_side)
     
     if new_floor_finder.calibrated:
         game_logic.floor_finder = new_floor_finder
         print("[FLOOR_CAL] Floor calibration complete and active.")
-        print("[FLOOR_CAL] Top camera points:")
-        for i, pt in enumerate(pts_cam_top.tolist(), start=1):
+        print("[FLOOR_CAL] Main camera points:")
+        for i, pt in enumerate(pts_cam_main.tolist(), start=1):
             print(f"  P{i}: {pt}")
         print("[FLOOR_CAL] Side camera points:")
         for i, pt in enumerate(pts_cam_side.tolist(), start=1):
@@ -428,8 +402,11 @@ def main():
     print_welcome_instructions()
 
     dual_cam = DualCameraManager().start()
-    processor_top = BallProcessor(camera_profile="top")
+    processor_main = BallProcessor(camera_profile="main")
     processor_side = BallProcessor(camera_profile="side")
+    processor_header = None
+    header_cap = None
+    has_header_cam = False
     floor_finder = FloorFinder()
     game_logic = JugglingCounter(history_len=10, floor_finder=floor_finder)
     print(f"[INFO] Floor epsilon: {game_logic.floor_epsilon_cm:.2f} cm")
@@ -437,11 +414,26 @@ def main():
     target_w = CONFIG["camera"]["width"]
     target_h = CONFIG["camera"]["height"]
     
-    is_video_top = isinstance(CONFIG["camera"]["top_source"], str)
+    header_source = CONFIG["camera"].get("header_source")
+    if header_source is not None:
+        header_cap = cv2.VideoCapture(header_source)
+        header_cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_w)
+        header_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_h)
+        if header_cap.isOpened():
+            processor_header = BallProcessor(camera_profile="header")
+            has_header_cam = True
+            print(f"[INFO] Header camera opened from {header_source}")
+        else:
+            print(f"[WARNING] Header camera failed to open: {header_source}")
+            header_cap.release()
+            header_cap = None
+    
+    main_src = CONFIG["camera"].get("main_source", CONFIG["camera"].get("top_source"))
+    is_video_main = isinstance(main_src, str)
     is_video_side = isinstance(CONFIG["camera"]["side_source"], str)
-    delay_ms = 33 if (is_video_top or is_video_side) else 1
+    delay_ms = 33 if (is_video_main or is_video_side) else 1
 
-    _, floor_pts_top, floor_pts_side = load_floor_points()
+    _, floor_pts_main, floor_pts_side = load_floor_points()
     show_floor_overlay = True
     floor_flash_until = 0.0
     color_only_mode = False
@@ -454,26 +446,48 @@ def main():
     score_p2 = 0
 
     while True:
-        frame_top_raw, frame_side_raw = dual_cam.read()
+        frame_main_raw, frame_side_raw = dual_cam.read()
 
-        if frame_top_raw is None or frame_side_raw is None:
+        if frame_main_raw is None or frame_side_raw is None:
             print("[WARNING] End of stream or camera failure.")
             break
 
-        frame_top = cv2.resize(frame_top_raw, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        frame_main = cv2.resize(frame_main_raw, (target_w, target_h), interpolation=cv2.INTER_AREA)
         frame_side = cv2.resize(frame_side_raw, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
-        if color_only_mode:
-            processor_top.mog_bypass_frames = max(processor_top.mog_bypass_frames, 2)
-            processor_side.mog_bypass_frames = max(processor_side.mog_bypass_frames, 2)
-        
-        # Side camera uses strict (Hough only); top camera relaxes if side sees the ball
-        data_side, mask_side, status_side = processor_side.process(frame_side, detection_mode="strict")
-        top_mode = "relaxed" if data_side is not None else "strict"
-        data_top, mask_top, status_top = processor_top.process(frame_top, detection_mode=top_mode)
-        status_top += f" [{top_mode.upper()}]"
+        frame_header = None
+        data_header = None
+        status_header = "HEADER: NO CAMERA"
+        if has_header_cam and header_cap is not None:
+            ret_header, frame_header_raw = header_cap.read()
+            if not ret_header:
+                if isinstance(header_source, str):
+                    header_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret_header, frame_header_raw = header_cap.read()
+            if not ret_header or frame_header_raw is None:
+                print("[WARNING] Header camera lost. Disabling header support.")
+                has_header_cam = False
+                header_cap.release()
+                header_cap = None
+            else:
+                frame_header = cv2.resize(frame_header_raw, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
-        current_count, logic_feedback = game_logic.update(data_top, data_side, frame_width=target_w, frame_height=target_h)
+        if color_only_mode:
+            processor_main.mog_bypass_frames = max(processor_main.mog_bypass_frames, 2)
+            processor_side.mog_bypass_frames = max(processor_side.mog_bypass_frames, 2)
+            if processor_header is not None:
+                processor_header.mog_bypass_frames = max(processor_header.mog_bypass_frames, 2)
+        
+        # Side camera uses strict (Hough only); main camera relaxes if side sees the ball
+        data_side, mask_side, status_side = processor_side.process(frame_side, detection_mode="strict")
+        main_mode = "relaxed" if data_side is not None else "strict"
+        data_main, mask_main, status_main = processor_main.process(frame_main, detection_mode=main_mode)
+        status_main += f" [{main_mode.upper()}]"
+
+        if has_header_cam and frame_header is not None and processor_header is not None:
+            data_header, mask_header, status_header = processor_header.process(frame_header, detection_mode="strict")
+
+        current_count, logic_feedback = game_logic.update(main_data=data_main, side_data=data_side, header_data=data_header, frame_width=target_w, frame_height=target_h)
 
         if logic_feedback and "DROP" in logic_feedback:
             floor_flash_until = time.time() + 0.5
@@ -484,7 +498,9 @@ def main():
 
         draw_tracking_info(frame_side, data_side, f"SIDE: {status_side}", (255, 255, 0)) 
         draw_game_score(frame_side, current_count, score_p1, score_p2, active_player, logic_feedback)
-        draw_tracking_info(frame_top, data_top, f"TOP: {status_top}", (0, 255, 0))
+        draw_tracking_info(frame_main, data_main, f"MAIN: {status_main}", (0, 255, 0))
+        if has_header_cam and frame_header is not None:
+            draw_tracking_info(frame_header, data_header, f"HEADER: {status_header}", (255, 0, 255))
         
         if hit_popup_text:
             draw_hit_popup(frame_side, hit_popup_text, time.time() - hit_popup_time)
@@ -492,20 +508,22 @@ def main():
         if color_only_mode:
             cv2.putText(frame_side, "COLOR-ONLY (D)", (8, 45),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
-            cv2.putText(frame_top, "COLOR-ONLY (D)", (8, 45),
+            cv2.putText(frame_main, "COLOR-ONLY (D)", (8, 45),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
 
         if show_floor_overlay and not color_only_mode:
             floor_is_red = time.time() < floor_flash_until
-            top_color = (0, 0, 220) if floor_is_red else (0, 180, 0)
+            main_color = (0, 0, 220) if floor_is_red else (0, 180, 0)
             side_color = (0, 0, 220) if floor_is_red else (180, 100, 0)
-            top_alpha = 0.45 if floor_is_red else 0.3
+            main_alpha = 0.45 if floor_is_red else 0.3
             side_alpha = 0.45 if floor_is_red else 0.3
-            draw_floor_overlay(frame_top, floor_pts_top, color=top_color, alpha=top_alpha)
+            draw_floor_overlay(frame_main, floor_pts_main, color=main_color, alpha=main_alpha)
             draw_floor_overlay(frame_side, floor_pts_side, color=side_color, alpha=side_alpha)
 
         cv2.imshow("Main - SIDE View (Master)", frame_side)
-        cv2.imshow("Main - TOP View (Slave)", frame_top)
+        cv2.imshow("Main - FRONT View (Main)", frame_main)
+        if has_header_cam and frame_header is not None:
+            cv2.imshow("Header View (Ceiling)", frame_header)
         
         key = cv2.waitKey(delay_ms) & 0xFF
         
@@ -514,11 +532,11 @@ def main():
             
         elif key == ord('b') or key == ord('B'):
             print("[INPUT] Resetting MOG2 background models...")
-            processor_top.set_instant_background(frame_top)
+            processor_main.set_instant_background(frame_main)
             processor_side.set_instant_background(frame_side)
 
         elif key == ord('s') or key == ord('S'):
-            processor_top.disable_mog_temporarily(15)
+            processor_main.disable_mog_temporarily(15)
             processor_side.disable_mog_temporarily(15)
             perform_flash_calibration(dual_cam, game_logic)
 
@@ -527,24 +545,27 @@ def main():
             game_logic.reset()
 
         elif key == ord('h') or key == ord('H'):
-            print("[INPUT] Calibrating header radius...")
-            processor_top.disable_mog_temporarily(15)
-            perform_flash_head_calibration(dual_cam, game_logic)
+            print("[INPUT] Calibrating header height...")
+            if has_header_cam and processor_header is not None and header_cap is not None:
+                processor_header.disable_mog_temporarily(15)
+                perform_flash_header_calibration(header_cap, game_logic)
+            else:
+                print("[WARNING] No optional header camera detected.")
 
         elif key == ord('c') or key == ord('C'):
             game_logic.clear_evaluation_log()
 
         elif key == ord('f') or key == ord('F'):
             print("[INPUT] Starting floor calibration...")
-            new_ff = perform_floor_calibration(dual_cam, processor_top, processor_side, game_logic)
+            new_ff = perform_floor_calibration(dual_cam, processor_main, processor_side, game_logic)
             if new_ff and new_ff.calibrated:
                 floor_finder = new_ff
-                _, floor_pts_top, floor_pts_side = load_floor_points()
+                _, floor_pts_main, floor_pts_side = load_floor_points()
 
         elif key == ord('d') or key == ord('D'):
             color_only_mode = not color_only_mode
             if not color_only_mode:
-                processor_top.mog_bypass_frames = 0
+                processor_main.mog_bypass_frames = 0
                 processor_side.mog_bypass_frames = 0
             state = "ON" if color_only_mode else "OFF"
             print(f"[INPUT] Color-only detection: {state}")
@@ -620,6 +641,8 @@ def main():
             game_logic.adjust_floor_epsilon(0.5)
 
     dual_cam.stop()
+    if header_cap is not None:
+        header_cap.release()
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":

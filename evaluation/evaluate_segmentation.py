@@ -6,10 +6,15 @@ and Hough circle mask. Computes DICE, IoU, Precision, Recall, F1, Accuracy.
 import cv2
 import numpy as np
 import os
+import sys
 import csv
 from config import CONFIG
 
-EVAL_DIR = "evaluation"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+EVAL_DIR = os.path.join(BASE_DIR, "evaluation")
 INPUT_DIR = os.path.join(EVAL_DIR, "eval_input")
 GT_DIR = os.path.join(EVAL_DIR, "ground_truth")
 MASKS_DIR = os.path.join(EVAL_DIR, "pipeline_masks")

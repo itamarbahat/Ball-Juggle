@@ -11,7 +11,8 @@ import torch
 from PIL import Image
 from transformers import Sam3Processor, Sam3Model
 
-EVAL_DIR = "evaluation"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EVAL_DIR = os.path.join(BASE_DIR, "evaluation")
 INPUT_DIR = os.path.join(EVAL_DIR, "eval_input")
 GT_DIR = os.path.join(EVAL_DIR, "ground_truth")
 

@@ -10,7 +10,7 @@ class BallProcessor:
     contour analysis (relaxed). Kalman filter smooths tracking across frames.
     """
 
-    def __init__(self, camera_profile="top"):
+    def __init__(self, camera_profile="main"):
         self.profile = camera_profile
         self.lower_hsv, self.upper_hsv = load_hsv_config(camera_profile)
         print(f"[INFO] Processor '{self.profile}' initialized.")

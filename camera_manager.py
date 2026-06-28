@@ -65,22 +65,22 @@ class CameraManager:
 
 
 class DualCameraManager:
-    """Manages top and side CameraManager instances together."""
+    """Manages main and side CameraManager instances together."""
 
     def __init__(self):
-        top_src = CONFIG["camera"]["top_source"]
+        main_src = CONFIG["camera"].get("main_source", CONFIG["camera"].get("top_source"))
         side_src = CONFIG["camera"]["side_source"]
-        self.cam_top = CameraManager(src=top_src, name="TopCam")
+        self.cam_main = CameraManager(src=main_src, name="MainCam")
         self.cam_side = CameraManager(src=side_src, name="SideCam")
 
     def start(self):
-        self.cam_top.start()
+        self.cam_main.start()
         self.cam_side.start()
         return self
 
     def read(self):
-        return self.cam_top.read(), self.cam_side.read()
+        return self.cam_main.read(), self.cam_side.read()
 
     def stop(self):
-        self.cam_top.stop()
+        self.cam_main.stop()
         self.cam_side.stop()

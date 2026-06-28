@@ -10,7 +10,11 @@ import csv
 from datetime import datetime
 from config import CONFIG
 
-EVAL_DIR = "evaluation"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+EVAL_DIR = os.path.join(BASE_DIR, "evaluation")
 FRAMES_DIR = os.path.join(EVAL_DIR, "frames")
 GT_DIR = os.path.join(EVAL_DIR, "ground_truth")
 RESULTS_DIR = os.path.join(EVAL_DIR, "results")

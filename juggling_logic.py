@@ -16,94 +16,104 @@ except Exception:
     print("[WARNING] pygame not available – drop sound will be silent.")
 
 class JugglingCounter:
-    """
-    Core game logic: aggregates dual-camera data, tracks ball state via
-    a sliding window, detects kicks/drops using velocity-flip analysis,
-    and manages calibration parameters.
+    """Orchestrates the juggling state machine using velocity-flip inertia-based hit detection,
+    dual-camera velocity tracking, homography-based floor verification, and a
+    retroactive drop wrapper that removes false bounce hits.
     """
 
-    def __init__(self, history_len=150, floor_finder=None): 
+    def __init__(self, history_len=150, floor_finder=None):
+        """Initialize the juggling counter with tracking history, floor geometry state,
+        and the live tuning parameters used by the hit/drop logic.
+
+        Args:
+            history_len (int): Number of prior frames retained for velocity
+                smoothing and event history. VALUE: 150 frames (5 seconds at 30 FPS).
+            floor_finder (FloorFinder): Optional instance of FloorFinder for homography-based
+                floor verification.
+        """
+        #homography instance for floor detection
         self.floor_finder = floor_finder
         
+        # --- State Variables ---
         self.count = 0    
         self.last_hit_time = 0
-        self.cooldown = 0.05
+        self.cooldown = 0.05        # Seconds between valid hits (prevents double counting)
         
-        self.is_falling = False
-        self.fall_counter = 0
-        self.rise_counter = 0
+        # --- Inertia State Machine Variables ---
+        self.is_falling = False     # Boolean flag: Is the ball confirmed to be falling?
+        self.fall_counter = 0       # Counter for consecutive falling frames
+        self.rise_counter = 0       # Counter for consecutive rising frames (for hit confirmation)
         
+        # --- Configuration Loading ---
         self.jitter_thresh = CONFIG["logic"].get("jitter_threshold", 20)
         self.floor_tol = CONFIG["logic"].get("floor_tolerance", 30)
         self.header_ratio = CONFIG["logic"].get("header_height_ratio", 0.35)
         self.required_inertia_frames = CONFIG["logic"].get("inertia_frames", 2)
 
+        # --- 2-Point Anchor System (Perspective Floor Map) ---
+        # Instead of a single slope, we hold two absolute Y heights for Left and Right edges.
         self.floor_left_y = CONFIG["logic"].get("floor_left_y", 350)
         self.floor_right_y = CONFIG["logic"].get("floor_right_y", 350)
+        # Defines the active playing area width. 
+        # Ball drops outside these X coordinates (e.g., hitting a wall) are ignored.
+        # Defaults to full frame width (0 to 640).
         self.floor_x_start = 0 
         self.floor_x_end = CONFIG["camera"]["width"]
-        
-        self.radius_factor = CONFIG["logic"].get("radius_correction_factor", 0.5)
+        # --- Floor Epsilon Configuration --- (World distance tolerance)
         self.floor_epsilon_cm = load_floor_epsilon(default_value=5.0)
         print(f"[INFO] Floor epsilon loaded: {self.floor_epsilon_cm:.2f} cm")
         
-        self.history_len = history_len  
-        self.side_history = deque(maxlen=history_len)   # (y, timestamp, velocity)
-        self.top_history = deque(maxlen=history_len)    # (r, timestamp)
-        
-        self.baseline = {
-            "floor_y": None,   
-            "floor_x": None,   
-            "floor_r": None,
-            "is_set": False
-        }
+        #--- History Buffers ---
+        self.history_len = history_len            
+        self.side_history = deque(maxlen=history_len)      # Stores (y, timestamp, velocity) tuples for side camera tracking
+        self.header_history = deque(maxlen=history_len)    # Stores (radius, timestamp) tuples for header camera tracking
 
-        self.last_known_pos = None
+        #--- Prediction state (for occlusion handling) ---  
+        self.last_known_pos = None   # (y, timestamp) of the last known ball position
         self.last_velocity = 0
         self.lost_frames = 0
         self.MAX_LOST_FRAMES = 30
 
-        self.game_active = False
-        self.countdown_active = False
-        self.countdown_start_time = 0
+        # --- Game State Management ---
+        self.game_active = False            # Is the game currently running and counting?
+        self.countdown_active = False       # Is the 3-second countdown running?
+        self.countdown_start_time = 0       # Timestamp of when 'T' was pressed
 
-        self.baseline_head_r = None
-        self.is_rising_to_head = False
-        self.rise_counter = 0
-        self.is_first_kick = True
-        self.top_growth_counter = 0
-        self.top_shrink_counter = 0
-        self.is_growing = False
+        # --- Header / Top-Camera Logic : Extension State ---
+        # These fields are kept as a scaffold for a future 3rd-camera or top-down
+        # header pipeline that measures radius expansion/contraction (radius-flip)
+        # and triggers a header event from a dedicated ceiling stream.
+        # In the current dual-camera gameplay loop, the primary floor logic is driven
+        # by the side camera plus the calibrated FloorFinder, so this state is not
+        # directly linked to the active scoring path.
+        self.header_baseline_r = None         # Calibrated minimum radius for a valid header height
+        self.is_rising_to_header = False      # Reserved for a future header-camera rise-state machine
+        self.rise_counter = 0                 # Reserved counter for header radius growth tracking
+        self.is_first_kick = True             # Protects the ball while it rests on the floor before the first flick-up
+        self.is_falling_from_header = False   # Reserved flag for a future header fall-state transition
+        self.header_growth_counter = 0        # Number of consecutive frames where header-camera radius grows
+        self.header_shrink_counter = 0        # Number of consecutive frames where header-camera radius shrinks
+        self.is_header_growing = False        # Reserved flag for the future header-camera growth direction state
 
+        # --- Behavioral Death Trackers ---
         self.lost_frames = 0
-        self.frozen_frames = 0
-        self.dying_start_time = 0
-        self.hit_timestamps = []
+        self.frozen_frames = 0              # How many frames the ball has been motionless 
+        self.dying_start_time = 0           # Timestamp when the ball was first lost or frozen
+        self.hit_timestamps = []            # List of timestamps for retroactive drop analysis/for rollback
 
-        self.EDGE_MARGIN_PX = 30
+
+        self.EDGE_MARGIN_PX = 30            # Pixels from the left/right edges of the frame that are considered "out of bounds"
         self.last_exit_side = None
 
-    def set_baseline(self, top_data, side_data):
-        """Stores ball position and radius from side camera as the ground-truth reference."""
-        if side_data:
-            self.baseline["floor_y"] = side_data[1] 
-            self.baseline["floor_x"] = side_data[0]
-            ref_r = side_data[2]
-            self.baseline["floor_r"] = ref_r
-            
-            self.baseline["is_set"] = True
-            print(f"[CAL] Baseline set: radius={ref_r}, L_anchor={self.floor_left_y}, R_anchor={self.floor_right_y}")
+    def calibrate_head_height(self, radius):
+        """Sets the header-camera radius baseline for future header detection."""
+        try:
+            self.header_baseline_r = float(radius)
+            print(f"[CAL] Header baseline set: min radius = {self.header_baseline_r}")
             return True
-            
-        return False
-    
-    def set_head_baseline(self, top_data):
-        """Sets the minimum top-camera radius that qualifies as a header."""
-        if top_data:
-            self.baseline_head_r = top_data[2]
-            print(f"[CAL] Head baseline set: min radius = {self.baseline_head_r}")
-            return True
-        return False
+        except (TypeError, ValueError):
+            print("[WARNING] Invalid header radius provided for calibration.")
+            return False
     
 
     def adjust_floor_start_x(self, delta):
@@ -177,10 +187,16 @@ class JugglingCounter:
 
     def _check_retroactive_drop(self, current_time):
         """
-        Retroactive drop analysis using time deltas between hits.
+        Secondary safety wrapper for drop detection.
+        The homography layer is the primary ground-plane check; this retroactive
+        analysis catches bounce-like chains and transient floor vibrations when
+        the ball appears frozen or briefly lost after the primary logic did not
+        classify the event as a drop.
+        idea: use time deltas between recent hits to detect floor bounces. If the ball was lost
         Floor bounces produce rapidly shrinking intervals (restitution decay),
         while human juggles keep a steadier rhythm. Walks back recent hits
         that match a bounce pattern and subtracts them from the score.
+        
         """
         recent_hits = [t for t in self.hit_timestamps if (current_time - t) <= 5.0]
         if not recent_hits: 
@@ -233,7 +249,7 @@ class JugglingCounter:
 
         return f"DROP_MINUS_{invalid_hits}" if invalid_hits > 0 else "DROP"
 
-    def _detect_impact(self, current_x, current_y, current_r, current_time, frame_width, frame_height, top_data=None):
+    def _detect_impact(self, current_x, current_y, current_r, current_time, frame_width, frame_height, main_data=None):
         """Detects HIT or DROP using velocity-flip, boundary checks, and floor homography."""
 
         if len(self.side_history) < 2: 
@@ -249,11 +265,11 @@ class JugglingCounter:
                 return "DROP"
 
         # Homography floor check: both cameras must agree the ball is on the ground plane
-        if self.floor_finder and self.floor_finder.calibrated and top_data is not None and not self.is_first_kick:
-            pixel_top = (top_data[0], top_data[1])
+        if self.floor_finder and self.floor_finder.calibrated and main_data is not None and not self.is_first_kick:
+            pixel_main = (main_data[0], main_data[1])
             pixel_side = (current_x, current_y)
             on_ground, distance, _, _ = self.floor_finder.is_ball_on_floor(
-                pixel_top,
+                pixel_main,
                 pixel_side,
                 epsilon=self.floor_epsilon_cm
             )
@@ -283,7 +299,13 @@ class JugglingCounter:
                 self.dying_start_time = current_time 
                 
             if self.frozen_frames >= 30 and not self.is_first_kick:
-                return self._check_retroactive_drop(current_time)
+                # If the frozen ball is low, it may be resting on the floor and
+                # should use retroactive bounce analysis as a secondary wrapper.
+                # If it is frozen in the upper half of the frame, treat it as a
+                # standard drop because it is likely caught or stuck.
+                if current_y is not None and current_y > (frame_height / 2):
+                    return self._check_retroactive_drop(current_time)
+                return "DROP"
         else:
             self.frozen_frames = 0
 
@@ -327,8 +349,8 @@ class JugglingCounter:
 
         return None
 
-    def update(self, top_data, side_data, frame_width=640, frame_height=360):
-        """Per-frame update: processes side-cam kicks, top-cam headers, and drop conditions."""
+    def update(self, main_data, side_data, header_data=None, frame_width=640, frame_height=360):
+        """Per-frame update: processes side-cam kicks, main-cam floor homography, header-cam hits, and drop conditions."""
         now = time.time()
         current_y = None
         current_x = None 
@@ -337,15 +359,8 @@ class JugglingCounter:
         feedback = status
         event = None
 
-        if top_data:
-            self.top_history.append((top_data[2], now))
-
-        # Radius gate: reject detections that are too big/small vs. the calibrated radius
-        if side_data and self.baseline["is_set"]:
-            _, _, test_r = side_data
-            base_r = self.baseline["floor_r"]
-            if test_r > (base_r * 1.5) or test_r < (base_r * 0.5):
-                side_data = None
+        if header_data:
+            self.header_history.append((header_data[2], now))
 
         if side_data:
             current_x, current_y, current_r = side_data
@@ -364,9 +379,9 @@ class JugglingCounter:
             self.side_history.append((current_y, now, velocity))
             status = "Tracking Side"
 
-        elif top_data:
+        elif main_data:
             self.lost_frames = 0
-            status = "Tracking Top Only"
+            status = "Tracking Main Only"
             current_y = None
 
         else:
@@ -403,17 +418,26 @@ class JugglingCounter:
                 if last_y < 100 and self.last_velocity < 0:
                     timeout_limit = 90
                     
-            if self.lost_frames >= timeout_limit and not side_data and not top_data and not self.is_first_kick:
+            if self.lost_frames >= timeout_limit and not side_data and not header_data and not self.is_first_kick:
                 margin_x = frame_width * 0.25
+                margin_top = frame_height * 0.20
+
                 last_x = self.last_known_pos[0] if self.last_known_pos else (frame_width / 2)
-                
+                last_y = self.last_known_pos[1] if self.last_known_pos else (frame_height / 2)
+                last_vel = self.last_velocity if hasattr(self, 'last_velocity') else 0
+
+                # Exited horizontally through the left/right margins
                 if last_x < margin_x or last_x > (frame_width - margin_x):
                     event = "DROP"
+                # Ball flew high out of frame through the ceiling
+                elif last_vel < 0 and last_y < margin_top:
+                    event = "DROP"
+                # Otherwise use retroactive bounce analysis as a secondary safety wrapper
                 else:
                     event = self._check_retroactive_drop(now)
             
             elif current_y is not None:
-                event = self._detect_impact(current_x, current_y, current_r, now, frame_width, frame_height, top_data=top_data)
+                event = self._detect_impact(current_x, current_y, current_r, now, frame_width, frame_height, main_data=main_data)
                 
             if event == "HIT":
                 self.count += 1
@@ -445,36 +469,36 @@ class JugglingCounter:
                 status = f"Game Over. Score: {self.count} | Clean: {clean_acc}% | Press T to restart."
 
         else:
-            if not self.baseline["is_set"]:
-                status = "WAITING: Press 'S' to calibrate."
+            if not self.floor_finder or not self.floor_finder.calibrated:
+                status = "WAITING: Press 'F' to calibrate floor."
             else:
                 status = "READY: Press 'T' to start."
             
             if feedback == "Tracking": 
                 feedback = ""
 
-        # Header detection via top-camera radius flip
-        if top_data and self.baseline_head_r is not None and len(self.top_history) >= 2:
+        # Header detection via header-camera radius flip
+        if header_data and self.header_baseline_r is not None and len(self.header_history) >= 2:
             status = "Header Tracking..."
             
-            top_r = top_data[2]
-            prev_top_r = self.top_history[-2][0]
-            delta_r = top_r - prev_top_r
+            header_r = header_data[2]
+            prev_header_r = self.header_history[-2][0]
+            delta_r = header_r - prev_header_r
             
             if delta_r < -0.5: 
-                self.top_shrink_counter += 1
-                self.top_growth_counter = 0
+                self.header_shrink_counter += 1
+                self.header_growth_counter = 0
             elif delta_r > 0.5: 
-                self.top_growth_counter += 1
-                self.top_shrink_counter = 0
+                self.header_growth_counter += 1
+                self.header_shrink_counter = 0
 
-            if self.top_shrink_counter >= 2:
-                self.is_falling_from_top = True
+            if self.header_shrink_counter >= 2:
+                self.is_falling_from_header = True
 
-            is_header_impact = self.is_falling_from_top and self.top_growth_counter >= 1
+            is_header_impact = self.is_falling_from_header and self.header_growth_counter >= 1
 
             if is_header_impact:
-                if prev_top_r >= self.baseline_head_r:
+                if prev_header_r >= self.header_baseline_r:
                     if (now - self.last_hit_time) > 0.25:
                         self.count += 1
                         self.last_hit_time = now
@@ -482,8 +506,8 @@ class JugglingCounter:
                         feedback = f"+1 HEAD  [{self.count}]"
                         print(f"[GAME] Header detected! Total: {self.count}")
                         
-                        self.is_falling_from_top = False
-                        self.top_shrink_counter = 0
+                        self.is_falling_from_header = False
+                        self.header_shrink_counter = 0
                     
         if feedback == "Tracking":
             feedback = status
@@ -493,7 +517,7 @@ class JugglingCounter:
     def reset(self):
         self.count = 0
         self.side_history.clear()
-        self.top_history.clear()
+        self.header_history.clear()
         self.is_falling = False
         self.fall_counter = 0
         self.rise_counter = 0
@@ -501,8 +525,8 @@ class JugglingCounter:
         print("[GAME] Counter reset.")
     
     def start_game(self):
-        if not self.baseline["is_set"]:
-            print("[WARNING] Calibrate floor first (press 'S').")
+        if not self.floor_finder or not self.floor_finder.calibrated:
+            print("[WARNING] Calibrate floor first (press 'F').")
             return False
             
         if not self.countdown_active and not self.game_active:

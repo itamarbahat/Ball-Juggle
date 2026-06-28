@@ -1,7 +1,9 @@
 CONFIG = {
     "camera": {
+        "main_source": 0,
         "top_source": 0,
         "side_source": 0,
+        "header_source": None,
         "width": 640,
         "height": 360
     },
@@ -49,5 +51,12 @@ CONFIG = {
         "floor_right_y": 350,
         "floor_tolerance": 15,
         "radius_correction_factor": 0.5
+    },
+
+    "calibration": {
+        "grid_width_cm": 100.0,
+        "grid_length_cm": 100.0,
+        "grid_width_intervals": 3,
+        "grid_length_intervals": 2
     }
 }

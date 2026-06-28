@@ -7,11 +7,17 @@ import cv2
 import numpy as np
 import os
 import glob
+import sys
 import time
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
 from config import CONFIG
 from Utils.config_utils import load_hsv_config
 
-EVAL_DIR = "evaluation"
+EVAL_DIR = os.path.join(BASE_DIR, "evaluation")
 INPUT_DIR = os.path.join(EVAL_DIR, "eval_input")
 MASKS_DIR = os.path.join(EVAL_DIR, "pipeline_masks")
 HOUGH_DIR = os.path.join(EVAL_DIR, "pipeline_hough")
