@@ -10,7 +10,7 @@ from camera_manager import DualCameraManager
 from ball_processor import BallProcessor
 from juggling_logic import JugglingCounter
 from config import CONFIG
-from Utils.config_utils import load_hsv_config, load_floor_points, save_floor_points, generate_world_points, generate_point_names
+from Utils.config_utils import load_hsv_config, save_hsv_config, load_floor_points, save_floor_points, generate_world_points, generate_point_names
 from floor_finding import FloorFinder
 from dashboard import Dashboard
 
@@ -24,7 +24,7 @@ def _check_hsv_calibrated():
     try:
         with open(os.path.join(HERE, "ball_config.json")) as f:
             d = json.load(f)
-        return "side" in d and "top" in d
+        return "side" in d and ("main" in d or "top" in d)
     except Exception:
         return False
 
@@ -163,10 +163,22 @@ def perform_flash_calibration(dual_cam, game_logic):
         collected_radii_main.sort(key=lambda x: x[2])
         final_main = collected_radii_main[len(collected_radii_main)//2]
         
-    if final_side:
-        print(f"[CAL] Radius calibration OK. Median radius: {final_side[2]}")
+    if final_side and final_main:
+        game_logic.baseline = {
+            "is_set": True,
+            "main_radius": final_main[2],
+            "side_radius": final_side[2],
+        }
+        print(f"[CAL] Radius calibration OK. Median radii: main={final_main[2]}, side={final_side[2]}")
+    elif final_side:
+        game_logic.baseline = {"is_set": False}
+        print("[CAL] Radius calibration PARTIAL — side view OK, main view not found.")
+    elif final_main:
+        game_logic.baseline = {"is_set": False}
+        print("[CAL] Radius calibration PARTIAL — main view OK, side view not found.")
     else:
-        print("[CAL] Radius calibration FAILED — ball not found in side view.")
+        game_logic.baseline = {"is_set": False}
+        print("[CAL] Radius calibration FAILED — ball not found in either view.")
 
 
 def perform_flash_header_calibration(header_cap, game_logic):
@@ -243,14 +255,18 @@ def perform_floor_calibration(dual_cam, processor_main, processor_side, game_log
     lower_side, upper_side = load_hsv_config("side")
     lower_main, upper_main = load_hsv_config("main")
     
-    for i in range(NUM_POINTS):
+    warn_until = 0.0
+    flash_until = 0.0
+    i = 0
+    while i < NUM_POINTS:
         print(f"[FLOOR_CAL] Point {i+1}/{NUM_POINTS}: {point_names[i]}  (world: {world_points[i].tolist()} cm)")
         print(f"            Press SPACE when ball is in position...")
         
         while True:
             frame_main_raw, frame_side_raw = dual_cam.read()
             if frame_main_raw is None or frame_side_raw is None:
-                break
+                time.sleep(0.02)
+                continue
                 
             frame_main = cv2.resize(frame_main_raw, (target_w, target_h))
             frame_side = cv2.resize(frame_side_raw, (target_w, target_h))
@@ -258,66 +274,68 @@ def perform_floor_calibration(dual_cam, processor_main, processor_side, game_log
             ball_main = _detect_ball_hsv(frame_main, lower_main, upper_main)
             ball_side = _detect_ball_hsv(frame_side, lower_side, upper_side)
 
-        display_main = frame_main.copy()
-        display_side = frame_side.copy()
+            display_main = frame_main.copy()
+            display_side = frame_side.copy()
 
-        now = time.time()
-        warn = "BALL NOT VISIBLE IN BOTH CAMERAS" if now < warn_until else None
-        flash_ok = now < flash_until
+            now = time.time()
+            warn = "BALL NOT VISIBLE IN BOTH CAMERAS" if now < warn_until else None
+            flash_ok = now < flash_until
 
-        draw_cal_hud(display_main, i, NUM_POINTS, point_names[i], world_points[i],
-                     len(captured_main), warn, flash_ok)
-        draw_cal_hud(display_side, i, NUM_POINTS, point_names[i], world_points[i],
-                     len(captured_side), warn, flash_ok)
+            draw_cal_hud(display_main, i, NUM_POINTS, point_names[i], world_points[i],
+                         len(captured_main), warn, flash_ok)
+            draw_cal_hud(display_side, i, NUM_POINTS, point_names[i], world_points[i],
+                         len(captured_side), warn, flash_ok)
 
-        if ball_main:
-            cv2.circle(display_main, (ball_main[0], ball_main[1]), ball_main[2], (0, 255, 0), 2, cv2.LINE_AA)
-            cv2.circle(display_main, (ball_main[0], ball_main[1]), 5, (0, 0, 255), -1)
+            if ball_main:
+                cv2.circle(display_main, (ball_main[0], ball_main[1]), ball_main[2], (0, 255, 0), 2, cv2.LINE_AA)
+                cv2.circle(display_main, (ball_main[0], ball_main[1]), 5, (0, 0, 255), -1)
 
-        if ball_side:
-            cv2.circle(display_side, (ball_side[0], ball_side[1]), ball_side[2], (0, 255, 0), 2, cv2.LINE_AA)
-            cv2.circle(display_side, (ball_side[0], ball_side[1]), 5, (0, 0, 255), -1)
+            if ball_side:
+                cv2.circle(display_side, (ball_side[0], ball_side[1]), ball_side[2], (0, 255, 0), 2, cv2.LINE_AA)
+                cv2.circle(display_side, (ball_side[0], ball_side[1]), 5, (0, 0, 255), -1)
 
-        for j, (pt, ps) in enumerate(zip(captured_main, captured_side)):
-            cv2.circle(display_main, (int(pt[0]), int(pt[1])), 8, (255, 0, 255), -1)
-            cv2.putText(display_main, str(j+1), (int(pt[0])+10, int(pt[1])),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2, cv2.LINE_AA)
-            cv2.circle(display_side, (int(ps[0]), int(ps[1])), 8, (255, 0, 255), -1)
-            cv2.putText(display_side, str(j+1), (int(ps[0])+10, int(ps[1])),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2, cv2.LINE_AA)
+            for j, (pt, ps) in enumerate(zip(captured_main, captured_side)):
+                cv2.circle(display_main, (int(pt[0]), int(pt[1])), 8, (255, 0, 255), -1)
+                cv2.putText(display_main, str(j+1), (int(pt[0])+10, int(pt[1])),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2, cv2.LINE_AA)
+                cv2.circle(display_side, (int(ps[0]), int(ps[1])), 8, (255, 0, 255), -1)
+                cv2.putText(display_side, str(j+1), (int(ps[0])+10, int(ps[1])),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2, cv2.LINE_AA)
 
-        cv2.imshow("Floor Cal - Camera Side A", display_side)
-        cv2.imshow("Floor Cal - Camera Side B", display_main)
+            cv2.imshow("Floor Cal - Camera Side A", display_side)
+            cv2.imshow("Floor Cal - Camera Side B", display_main)
 
-        key = cv2.waitKey(33) & 0xFF
+            key = cv2.waitKey(33) & 0xFF
 
-        if key == 27:  # ESC - cancel
-            print("[FLOOR_CAL] Cancelled by user.")
-            processor_ma.disable_mog_temporarily(0)
-            processor_side.disable_mog_temporarily(0)
-            return None
+            if key == 27:  # ESC - cancel
+                print("[FLOOR_CAL] Cancelled by user.")
+                processor_main.disable_mog_temporarily(0)
+                processor_side.disable_mog_temporarily(0)
+                return None
 
-        if key == 8:  # BACKSPACE - undo last captured point
-            if captured_main:
-                captured_main.pop()
-                captured_side.pop()
-                i -= 1
-                print(f"[FLOOR_CAL] Undo — back to point {i+1}.")
-            continue
+            if key == 8:  # BACKSPACE - undo last captured point
+                if captured_main:
+                    captured_main.pop()
+                    captured_side.pop()
+                    i = max(0, i - 1)
+                    print(f"[FLOOR_CAL] Undo — back to point {i+1}.")
+                continue
 
-        if key == 32:  # SPACE - capture
-            if ball_main and ball_side:
-                captured_main.append([ball_main[0], ball_main[1]])
-                captured_side.append([ball_side[0], ball_side[1]])
-                print(f"[FLOOR_CAL] Point {i+1} captured: TOP=({ball_main[0]},{ball_main[1]})  SIDE=({ball_side[0]},{ball_side[1]})")
-                flash_until = time.time() + CONFIG["ui"]["capture_flash_sec"]
-                i += 1
-            else:
-                missing = []
-                if not ball_main: missing.append("SIDE-B")
-                if not ball_side: missing.append("SIDE-A")
-                print(f"[FLOOR_CAL] Ball not detected in: {', '.join(missing)}. Reposition and retry.")
-                warn_until = time.time() + CONFIG["ui"]["warn_sec"]
+            if key == 32:  # SPACE - capture
+                if ball_main and ball_side:
+                    captured_main.append([ball_main[0], ball_main[1]])
+                    captured_side.append([ball_side[0], ball_side[1]])
+                    print(f"[FLOOR_CAL] Point {i+1} captured: MAIN=({ball_main[0]},{ball_main[1]})  SIDE=({ball_side[0]},{ball_side[1]})")
+                    flash_until = time.time() + CONFIG["ui"]["capture_flash_sec"]
+                    i += 1
+                    break
+                else:
+                    missing = []
+                    if not ball_main: missing.append("MAIN")
+                    if not ball_side: missing.append("SIDE")
+                    print(f"[FLOOR_CAL] Ball not detected in: {', '.join(missing)}. Reposition and retry.")
+                    warn_until = time.time() + CONFIG["ui"]["warn_sec"]
+                    continue
 
     processor_main.disable_mog_temporarily(0)
     processor_side.disable_mog_temporarily(0)
@@ -327,7 +345,7 @@ def perform_floor_calibration(dual_cam, processor_main, processor_side, game_log
         print("[FLOOR_CAL] Incomplete — calibration aborted.")
         return None
 
-    pts_cam_top = np.array(captured_main, dtype=np.float32)
+    pts_cam_main = np.array(captured_main, dtype=np.float32)
     pts_cam_side = np.array(captured_side, dtype=np.float32)
     
     save_floor_points(world_points, pts_cam_main, pts_cam_side)
@@ -529,7 +547,7 @@ def main():
     target_w = CONFIG["camera"]["width"]
     target_h = CONFIG["camera"]["height"]
 
-    is_video_top = isinstance(CONFIG["camera"]["main_source"], str)
+    is_video_main = isinstance(CONFIG["camera"]["main_source"], str)
     is_video_side = isinstance(CONFIG["camera"]["side_source"], str)
 
     ui = CONFIG["ui"]
@@ -554,9 +572,9 @@ def main():
                 CONFIG["camera"]["main_source"],
                 CONFIG["camera"]["side_source"],
                 target_w, target_h)
-            CONFIG["camera"]["top_source"] = top
+            CONFIG["camera"]["main_source"] = top
             CONFIG["camera"]["side_source"] = side
-            print(f"[INFO] Cameras selected -> Side A (main)={side}, Side B (secondary)={top}")
+            print(f"[INFO] Cameras selected -> Main={top}, Side={side}")
             cam_box["dual"] = DualCameraManager().start()
         except Exception as e:                       # pragma: no cover
             cam_box["error"] = e
@@ -581,13 +599,14 @@ def main():
         dash.close()
         return
 
-    processor_main = BallProcessor(camera_profile="top")
+    processor_main = BallProcessor(camera_profile="main")
     processor_side = BallProcessor(camera_profile="side")
     processor_header = None
     header_cap = None
     has_header_cam = False
     floor_finder = FloorFinder()
     game_logic = JugglingCounter(history_len=10, floor_finder=floor_finder)
+    game_logic.baseline = {"is_set": False}
     print(f"[INFO] Floor epsilon: {game_logic.floor_epsilon_cm:.2f} cm")
     
     target_w = CONFIG["camera"]["width"]
@@ -649,10 +668,10 @@ def main():
         # dashboard window open and show a "WARMING UP" panel for the missing feed
         # instead of exiting the moment a single frame is None (the old behaviour,
         # which made the window flash open and immediately close).
-        top_alive = frame_main_raw is not None
+        main_alive = frame_main_raw is not None
         side_alive = frame_side_raw is not None
-        frame_top = (cv2.resize(frame_main_raw, (target_w, target_h), interpolation=cv2.INTER_AREA)
-                     if top_alive else np.zeros((target_h, target_w, 3), np.uint8))
+        frame_main = (cv2.resize(frame_main_raw, (target_w, target_h), interpolation=cv2.INTER_AREA)
+                      if main_alive else np.zeros((target_h, target_w, 3), np.uint8))
         frame_side = (cv2.resize(frame_side_raw, (target_w, target_h), interpolation=cv2.INTER_AREA)
                       if side_alive else np.zeros((target_h, target_w, 3), np.uint8))
         frame_header = None
@@ -711,21 +730,21 @@ def main():
         #     (before tracking overlays are drawn) so its preview is unobstructed ---
         if dash.show_hsv:
             dash.hsv_preview_frame = (frame_side if dash.hsv_profile == "side"
-                                      else frame_top).copy()
+                                      else frame_main).copy()
 
         # --- tracking overlays on both feeds (drawn on the numpy frames) ---
         draw_tracking_info(frame_side, data_side, f"SIDE-A: {status_side}", (255, 255, 0))
-        draw_tracking_info(frame_top, data_top, f"SIDE-B: {status_top}", (0, 255, 0))
+        draw_tracking_info(frame_main, data_main, f"SIDE-B: {status_main}", (0, 255, 0))
 
         if color_only_mode:
             cv2.putText(frame_side, "COLOR-ONLY (D)", (8, 70),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2, cv2.LINE_AA)
-            cv2.putText(frame_top, "COLOR-ONLY (D)", (8, 70),
+            cv2.putText(frame_main, "COLOR-ONLY (D)", (8, 70),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2, cv2.LINE_AA)
 
         if show_floor_overlay and not color_only_mode:
             floor_is_red = now < floor_flash_until
-            top_color = (0, 0, 220) if floor_is_red else (0, 180, 0)
+            main_color = (0, 0, 220) if floor_is_red else (0, 180, 0)
             side_color = (0, 0, 220) if floor_is_red else (180, 100, 0)
             main_alpha = 0.45 if floor_is_red else 0.3
             side_alpha = 0.45 if floor_is_red else 0.3
@@ -764,11 +783,11 @@ def main():
 
         # --- live B/W detection view: feed the dashboard the latest combined mask
         #     image while the view is open (rendered inside the dashboard window) ---
-        dash.mask_frame = build_mask_view(mask_side, mask_top) if dash.show_mask else None
+        dash.mask_frame = build_mask_view(mask_side, mask_main) if dash.show_mask else None
 
         # --- render the unified dashboard (Side A = main, Side B = secondary) ---
         # Pass None for a dead feed so the dashboard shows "WARMING UP" for it.
-        dash.draw(frame_side if side_alive else None, frame_top if top_alive else None)
+        dash.draw(frame_side if side_alive else None, frame_main if main_alive else None)
 
         # ------------------------------------------------------------------ #
         #  Input — all keys now come from pygame                             #
@@ -791,7 +810,7 @@ def main():
                 upper = np.array(dash.hsv_upper, dtype=np.uint8)
                 save_hsv_config(lower, upper, profile)
                 # Apply immediately to the live processor for that camera.
-                proc = processor_side if profile == "side" else processor_top
+                proc = processor_side if profile == "side" else processor_main
                 proc.lower_hsv, proc.upper_hsv = lower, upper
                 dash.cal["hsv"] = "session" if _check_hsv_calibrated() else dash.cal["hsv"]
                 dash.confirm_hsv_saved()         # in-modal "SAVED" badge (toast is hidden behind it)
@@ -823,7 +842,7 @@ def main():
 
             elif key == pygame.K_b:
                 print("[INPUT] Resetting MOG2 background models...")
-                processor_main.set_instant_background(frame_top)
+                processor_main.set_instant_background(frame_main)
                 processor_side.set_instant_background(frame_side)
                 dash.cal["background"] = True
                 dash.set_toast("Background reset", time.time() + ui["toast_sec"])
